@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+*.local
+frontend/dist/
+
+# Chrome에 바로 로드할 수 있도록 extension/dist 는 커밋 가능 (ignore 하지 않음)
+# 루트/기타 패키지의 dist 만 무시
+/dist/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Secrets
+*-firebase-adminsdk*.json
+serviceAccount*.json
+credentials.json
+.env
+*.zip

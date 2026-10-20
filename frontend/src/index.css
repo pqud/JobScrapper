@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --ink: #0f1f1c;
+  --moss: #0f766e;
+  --mist: #e6f2ef;
+}
+
+body {
+  @apply bg-sand text-ink font-sans antialiased;
+  background-image:
+    radial-gradient(ellipse 80% 50% at 10% -10%, #c7ebe3 0%, transparent 55%),
+    radial-gradient(ellipse 60% 40% at 100% 0%, #dce8e3 0%, transparent 50%);
+  min-height: 100vh;
+}
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+.skeleton {
+  animation: pulse-soft 1.4s ease-in-out infinite;
+  background: linear-gradient(90deg, #e5eeeb, #f3f7f5, #e5eeeb);
+  background-size: 200% 100%;
+}

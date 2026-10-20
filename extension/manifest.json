@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "JobScrap",
+  "version": "0.3.0",
+  "description": "채용 공고 수집 + 사용자 AI 키로 구조화 + 기술 지도 (허용 사이트: src/lib/sites.ts)",
+  "permissions": [
+    "storage",
+    "tabs",
+    "activeTab",
+    "scripting",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "strip_ai_origin",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup/index.html",
+    "default_title": "JobScrap"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.jobkorea.co.kr/Recruit/GI_Read*",
+        "https://www.jobkorea.co.kr/Recruit/GI_read*",
+        "https://www.wanted.co.kr/wd/*"
+      ],
+      "js": ["content-scripts/detail-extract.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

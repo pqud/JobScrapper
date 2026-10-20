@@ -1,0 +1,1 @@
+const t={provider:"openai",apiKey:"",openaiModel:"gpt-4o-mini",anthropicModel:"claude-haiku-5-5",useAi:!0},o={entries:[],totalCalls:0,totalInputTokens:0,totalOutputTokens:0,totalTokens:0,totalEstimatedUsd:0};export{t as D,o as E};

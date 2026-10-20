@@ -1,0 +1,187 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #18202b;
+  --color-muted: #5c6877;
+  --color-line: #d9dfe7;
+  --color-soft: #f5f7fa;
+  --color-surface: #ffffff;
+  --color-page: #edf0f4;
+  --color-warn: #b45309;
+  --font-sans: "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR",
+    "Malgun Gothic", system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-ink: #e8ecf1;
+    --color-muted: #9aa6b5;
+    --color-line: #2d3643;
+    --color-soft: #212934;
+    --color-surface: #1a2028;
+    --color-page: #11151b;
+    --color-warn: #f2a64b;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--color-page);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Matrix sticky / rotated headers — hard in utilities alone */
+.mx-wrap {
+  overflow: auto;
+  max-height: 74vh;
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  background: var(--color-surface);
+}
+table.mx {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+}
+.mx th,
+.mx td {
+  padding: 0;
+}
+.mx thead th {
+  position: sticky;
+  background: var(--color-surface);
+  z-index: 3;
+}
+.mx .r1 th {
+  top: 0;
+  height: 28px;
+  text-align: left;
+  font-weight: 700;
+  padding: 0 8px;
+  border-left: 1px solid var(--color-line);
+  white-space: nowrap;
+}
+.mx .r2 th {
+  top: 28px;
+  height: 132px;
+  min-width: 32px;
+  width: 32px;
+  vertical-align: bottom;
+}
+.mx .r3 th {
+  top: 160px;
+  height: 24px;
+  font-weight: 500;
+  color: var(--color-muted);
+  border-bottom: 2px solid var(--color-ink);
+  font-variant-numeric: tabular-nums;
+}
+.mx .rot {
+  position: relative;
+  width: 32px;
+  height: 132px;
+  border: 0;
+  background: none;
+  display: block;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+.mx .rot span {
+  position: absolute;
+  left: 14px;
+  bottom: 4px;
+  transform-origin: 0 100%;
+  transform: rotate(-62deg);
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mx .rot:hover span {
+  text-decoration: underline;
+}
+.mx th.hl,
+.mx td.hl {
+  background: color-mix(in srgb, var(--color-ink) 9%, var(--color-surface));
+}
+.mx .rl {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--color-surface);
+  min-width: 250px;
+  max-width: 250px;
+  text-align: left;
+  border-right: 1px solid var(--color-line);
+}
+.mx thead .rl {
+  z-index: 5;
+}
+.mx tbody td {
+  height: 34px;
+  text-align: center;
+  border-bottom: 1px solid var(--color-line);
+}
+.mx tbody tr:hover td,
+.mx tbody tr:hover th {
+  background: var(--color-soft);
+}
+.mx .rn {
+  padding: 3px 10px 3px 12px;
+  border-left: 4px solid var(--cc, var(--color-ink));
+  display: block;
+  line-height: 1.3;
+}
+.mx .rn b {
+  display: block;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mx .rn span {
+  display: block;
+  color: var(--color-muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mx tbody th {
+  border-bottom: 1px solid var(--color-line);
+  font-weight: 400;
+}
+.mx .cg td {
+  height: 30px;
+  background: var(--color-soft);
+  font-weight: 700;
+  border-bottom: 1px solid var(--color-line);
+  text-align: left;
+}
+.mx .cg span {
+  position: sticky;
+  left: 12px;
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+}
+.mx .dot {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  vertical-align: middle;
+  background: var(--cc);
+}
+.mx .dot.h {
+  background: color-mix(in srgb, var(--cc) 22%, var(--color-surface));
+  border: 1.5px solid var(--cc);
+}
