@@ -63,15 +63,25 @@ export async function removeJob(id: string): Promise<void> {
   await chrome.storage.local.set({ [JOBS_KEY]: jobs });
 }
 
+/** Stable id from posting URL. Do not truncate btoa — shared prefixes collide. */
 export function jobIdFromUrl(url: string): string {
   try {
     const u = new URL(url);
-    const gi =
+    const path = u.pathname.replace(/\/+$/, "");
+    const jk =
       u.searchParams.get("GI_No") ||
       u.searchParams.get("gi_no") ||
-      u.pathname.match(/GI_Read\/(\d+)/i)?.[1];
-    return `jk-${gi || btoa(url).slice(0, 24)}`;
+      path.match(/GI_Read\/(\d+)/i)?.[1];
+    if (jk) return `jk-${jk}`;
+    const wd = path.match(/\/wd\/(\d+)/i)?.[1];
+    if (wd) return `wd-${wd}`;
+    const key = `${u.hostname}${path}${u.search}`;
+    let h = 0;
+    for (let i = 0; i < key.length; i++) {
+      h = (Math.imul(31, h) + key.charCodeAt(i)) | 0;
+    }
+    return `u-${(h >>> 0).toString(36)}`;
   } catch {
-    return `jk-${Date.now()}`;
+    return `u-${Date.now()}`;
   }
 }

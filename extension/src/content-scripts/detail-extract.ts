@@ -45,7 +45,7 @@ function isJunkImage(src: string, alt = ""): boolean {
 }
 
 function isPosterUrl(src: string): boolean {
-  return /file\d*\.jobkorea\.co\.kr|greetinghr|\/Mng\/|opening-attachments|cdn\.|attachments/i.test(
+  return /file\d*\.jobkorea\.co\.kr|greetinghr|\/Mng\/|opening-attachments|cdn\.|attachments|static\.wanted\.co\.kr\/images/i.test(
     src
   );
 }
@@ -75,11 +75,13 @@ function pageCompany(): string {
       return t;
     }
   }
+  const bracket = (document.title || "").match(/^\[([^\]]+)\]/);
+  if (bracket) return bracket[1].trim().slice(0, 80);
   const m = (document.title || "").match(/^(.+?)\s*채용/);
   return m ? m[1].trim().slice(0, 80) : "";
 }
 
-/** Real posting body — not the JobKorea chrome / sidebar. */
+/** Real posting body — JobKorea selectors first, then SPA main (Wanted…). */
 function bodyTextFromDoc(doc: Document): string {
   const sels = [
     "ul.detail-section li.detail-article",
@@ -100,7 +102,17 @@ function bodyTextFromDoc(doc: Document): string {
       if (t.length > 40) chunks.push(t);
     }
   }
-  return chunks.join("\n\n").trim();
+  const joined = chunks.join("\n\n").trim();
+  if (joined.length >= MIN_BODY_CHARS) return joined;
+
+  // Wanted 등 React SPA: 잡코리아용 class가 없음 → main/article 폴백
+  for (const sel of ["main", "[role='main']", "article"]) {
+    const el = doc.querySelector(sel) as HTMLElement | null;
+    if (!el) continue;
+    const t = (el.innerText || "").replace(/\n{3,}/g, "\n\n").trim();
+    if (t.length >= MIN_BODY_CHARS) return t;
+  }
+  return joined;
 }
 
 function collectBodyText(): string {

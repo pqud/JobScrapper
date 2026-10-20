@@ -50,6 +50,7 @@ table.mx {
 .mx th,
 .mx td {
   padding: 0;
+  box-sizing: border-box;
 }
 .mx thead th {
   position: sticky;
@@ -65,15 +66,22 @@ table.mx {
   border-left: 1px solid var(--color-line);
   white-space: nowrap;
 }
+/* Equal skill columns — width locked so long labels don't stretch cells */
+.mx .r2 th:not(.rl),
+.mx .r3 th:not(.rl),
+.mx tbody td {
+  width: 36px;
+  min-width: 36px;
+  max-width: 36px;
+}
 .mx .r2 th {
   top: 28px;
-  height: 132px;
-  min-width: 32px;
-  width: 32px;
+  height: 200px;
   vertical-align: bottom;
+  overflow: visible;
 }
 .mx .r3 th {
-  top: 160px;
+  top: 228px; /* 28 + 200 */
   height: 24px;
   font-weight: 500;
   color: var(--color-muted);
@@ -82,8 +90,8 @@ table.mx {
 }
 .mx .rot {
   position: relative;
-  width: 32px;
-  height: 132px;
+  width: 36px;
+  height: 200px;
   border: 0;
   background: none;
   display: block;
@@ -91,19 +99,18 @@ table.mx {
   cursor: pointer;
   color: inherit;
   font: inherit;
+  overflow: visible;
 }
 .mx .rot span {
   position: absolute;
-  left: 14px;
-  bottom: 4px;
+  left: 16px;
+  bottom: 6px;
   transform-origin: 0 100%;
   transform: rotate(-62deg);
   white-space: nowrap;
   font-size: 12px;
   font-weight: 500;
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* no ellipsis — full label; column width stays fixed above */
 }
 .mx .rot:hover span {
   text-decoration: underline;

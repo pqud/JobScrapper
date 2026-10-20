@@ -66,18 +66,18 @@ Multi-role:
 Keys:
 co=company name ≤40 chars (from page or poster image). Real company only — not JobKorea/Wanted.
 c=category one of fe|data|ai|be|game|etc
-r=required tech (from VOCAB only)
-p=preferred tech (from VOCAB only)
-x=short non-tech tags in English (e.g. 3y+, BS, remote) — max 6, each ≤12 chars
-t=optional short English role label ≤20 chars
+r=required tags (from VOCAB only — exact spelling)
+p=preferred tags (from VOCAB only — exact spelling)
+x=short non-VOCAB extras (e.g. 3y+, remote) — max 6, each ≤16 chars
+t=optional short role label ≤20 chars
 
-VOCAB (r/p must be exact strings from this list only):
+VOCAB (r/p must be exact strings from this list only; Korean entries allowed if listed):
 ${VOCAB}
 
 Rules:
 1) Output JSON object only. No explanations.
 2) Do NOT copy/transcribe posting text into the JSON.
-3) Tech names: English VOCAB only. Never Korean tech names. Unknown tech → omit.
+3) r/p: only exact VOCAB strings (any language). Not in VOCAB → omit. Do not invent synonyms.
 4) Prefer empty arrays over inventing tags.
 5) Always include co when readable (esp. image posters). Omit salary/location/deadline.`;
 

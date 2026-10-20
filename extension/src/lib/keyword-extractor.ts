@@ -84,6 +84,17 @@ export const TECH_KEYWORDS = [
   "Scrum",
   "Jira",
   "Figma",
+  "AI 개발 생산성 개선",
+  "영어",
+  "컴퓨터 공학",
+  "NestJs",
+  "Websocket",
+  "Jest",
+  "RTL",
+  "Cypress",
+  "컴포넌트 설계",
+  "상태 관리",
+
 ] as const;
 
 const TECH_SET = new Set(TECH_KEYWORDS.map((k) => k.toLowerCase()));
