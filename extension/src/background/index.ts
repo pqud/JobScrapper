@@ -3,7 +3,6 @@ import {
   DETAIL_EXTRACT_SCRIPT,
   DISABLE_SITE_GUARD,
   detailSitesLabel,
-  filterAllowedImportUrls,
   isHttpPageUrl,
   matchDetailSite,
 } from "../lib/sites";
@@ -161,71 +160,6 @@ async function collectCurrentTab(): Promise<{
   }
 }
 
-async function importUrls(
-  text: string,
-  onProgress?: (done: number, total: number, msg: string) => void
-): Promise<{ ok: boolean; count: number; errors: string[] }> {
-  const urls = filterAllowedImportUrls(text);
-  if (!urls.length) {
-    return {
-      ok: false,
-      count: 0,
-      errors: [`유효한 URL이 없습니다. (허용: ${detailSitesLabel()})`],
-    };
-  }
-  const errors: string[] = [];
-  let count = 0;
-  for (let i = 0; i < urls.length; i++) {
-    const url = urls[i];
-    if (!DISABLE_SITE_GUARD && !matchDetailSite(url)?.detail) {
-      errors.push(`${url}: 지원하지 않는 사이트`);
-      continue;
-    }
-    onProgress?.(i, urls.length, `수집 중 ${i + 1}/${urls.length}`);
-    let tabId: number | undefined;
-    try {
-      const tab = await chrome.tabs.create({ url, active: false });
-      tabId = tab.id;
-      if (!tabId) throw new Error("탭 생성 실패");
-      // wait for load
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("timeout")), 25000);
-        const listener = (
-          id: number,
-          info: chrome.tabs.TabChangeInfo
-        ) => {
-          if (id === tabId && info.status === "complete") {
-            clearTimeout(timer);
-            chrome.tabs.onUpdated.removeListener(listener);
-            resolve();
-          }
-        };
-        chrome.tabs.onUpdated.addListener(listener);
-      });
-      await sleep(800);
-      const raw = await extractFromTab(tabId);
-      let job = rawToStored(raw);
-      job = await structureJobIfNeeded(job);
-      await upsertJob(job);
-      count += 1;
-    } catch (e) {
-      errors.push(
-        `${url}: ${e instanceof Error ? e.message : String(e)}`
-      );
-    } finally {
-      if (tabId != null) {
-        try {
-          await chrome.tabs.remove(tabId);
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-  }
-  onProgress?.(urls.length, urls.length, `완료 ${count}/${urls.length}`);
-  return { ok: count > 0, count, errors };
-}
-
 /** 팝업 더블클릭 등으로 AI가 중복 호출되지 않게 */
 let collectLock = false;
 
@@ -237,20 +171,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     collectLock = true;
     void collectCurrentTab()
-      .then(sendResponse)
-      .finally(() => {
-        collectLock = false;
-      });
-    return true;
-  }
-
-  if (message.type === "IMPORT_URLS") {
-    if (collectLock) {
-      sendResponse({ ok: false, error: "이미 수집 중입니다. 잠시만 기다려 주세요." });
-      return false;
-    }
-    collectLock = true;
-    void importUrls(message.text || "")
       .then(sendResponse)
       .finally(() => {
         collectLock = false;

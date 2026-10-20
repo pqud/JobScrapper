@@ -103,24 +103,6 @@ export function isHttpPageUrl(url: string): boolean {
   }
 }
 
-export function isAllowedDetailUrl(url: string): boolean {
-  if (DISABLE_SITE_GUARD) return isHttpPageUrl(url);
-  return matchDetailSite(url) != null;
-}
-
-export function filterAllowedImportUrls(text: string): string[] {
-  const urls: string[] = [];
-  for (const line of text.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean)) {
-    try {
-      const u = new URL(line);
-      if (isAllowedDetailUrl(u.toString())) urls.push(u.toString());
-    } catch {
-      /* skip */
-    }
-  }
-  return [...new Set(urls)];
-}
-
 export function detailSitesLabel(): string {
   if (DISABLE_SITE_GUARD) return "모든 https 페이지(가드 OFF)";
   return SCRAP_SITES.filter((s) => s.detail)

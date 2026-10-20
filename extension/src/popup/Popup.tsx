@@ -10,7 +10,6 @@ export function Popup() {
   const [settings, setSettings] =
     useState<ExtensionSettings>(DEFAULT_SETTINGS);
   const [jobs, setJobs] = useState<StoredJob[]>([]);
-  const [paste, setPaste] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [showKey, setShowKey] = useState(false);
@@ -77,32 +76,6 @@ export function Popup() {
       );
       refreshJobs();
     });
-  };
-
-  const onImport = () => {
-    if (busy) return;
-    if (settings.apiKey) persistKeyNow(settings.apiKey);
-    setBusy(true);
-    setStatus("링크 수집 중…");
-    chrome.runtime.sendMessage(
-      { type: "IMPORT_URLS", text: paste },
-      (res) => {
-        setBusy(false);
-        if (chrome.runtime.lastError) {
-          setStatus(chrome.runtime.lastError.message || "가져오기 실패");
-          return;
-        }
-        if (!res?.ok) {
-          setStatus(res?.errors?.[0] || "가져오기 실패");
-          return;
-        }
-        const errN = res.errors?.length || 0;
-        setStatus(
-          `가져오기 ${res.count}건` + (errN ? ` · 실패 ${errN}` : "")
-        );
-        refreshJobs();
-      }
-    );
   };
 
   const onExport = () => {
@@ -221,30 +194,6 @@ export function Popup() {
         >
           {busy ? "수집 중…" : "현재 탭 수집"}
         </button>
-        <textarea
-          placeholder={
-            "잡코리아·원티드 상세 URL을 줄마다 붙여넣기\nhttps://www.jobkorea.co.kr/Recruit/GI_Read/...\nhttps://www.wanted.co.kr/wd/..."
-          }
-          value={paste}
-          onChange={(e) => setPaste(e.target.value)}
-          rows={3}
-          style={{
-            ...s.textarea,
-            ...(busy ? { opacity: 0.6, pointerEvents: "none" as const } : null),
-          }}
-          disabled={busy}
-        />
-        <button
-          type="button"
-          style={{
-            ...s.secondary,
-            ...(busy || !paste.trim() ? s.btnDisabled : null),
-          }}
-          disabled={busy || !paste.trim()}
-          onClick={onImport}
-        >
-          {busy ? "처리 중…" : "링크 가져오기"}
-        </button>
       </section>
 
       {status ? <p style={s.status}>{status}</p> : null}
@@ -272,10 +221,8 @@ export function Popup() {
                   <span style={s.muted}>{open ? "접기 ▲" : "상세 ▼"}</span>
                 </button>
                 <div style={s.meta}>
-                  {job.raw.format} · roles {job.roles.length}
-                  {job.salary ? ` · ${job.salary}` : ""}
-                  {job.structuredAt ? " · 구조화됨" : " · 원문만"}
-                  {job.structureError ? " · ⚠" : ""}
+                  {job.roles.length} roles
+                  {job.structureError ? " ⚠" : ""}
                 </div>
                 {open ? <JobDetail job={job} /> : null}
                 <div style={s.row}>
@@ -426,16 +373,6 @@ const s: Record<string, React.CSSProperties> = {
     borderRadius: 6,
     border: "1px solid #ddd",
   },
-  textarea: {
-    width: "100%",
-    boxSizing: "border-box",
-    padding: 8,
-    borderRadius: 6,
-    border: "1px solid #ddd",
-    resize: "vertical",
-    fontFamily: "inherit",
-    fontSize: 12,
-  },
   primary: {
     padding: "8px 10px",
     borderRadius: 6,
@@ -443,13 +380,6 @@ const s: Record<string, React.CSSProperties> = {
     background: "#1a1a1a",
     color: "#fff",
     fontWeight: 600,
-    cursor: "pointer",
-  },
-  secondary: {
-    padding: "8px 10px",
-    borderRadius: 6,
-    border: "1px solid #ccc",
-    background: "#fff",
     cursor: "pointer",
   },
   btnDisabled: {
