@@ -1,4 +1,6 @@
 import { structureWithAi, toStructuredRoles } from "../lib/ai";
+import type { FrameSnap } from "../content-scripts/detail-extract";
+import { describeGap, isEmptyExtract } from "../lib/content-root";
 import {
   DETAIL_EXTRACT_SCRIPT,
   DISABLE_SITE_GUARD,
@@ -18,41 +20,124 @@ import {
 import type { ExtensionSettings, RawJob, StoredJob } from "../lib/types";
 import { recordUsage } from "../lib/usage";
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function extractFromTab(
-  tabId: number,
-  timeoutMs = 14000
-): Promise<RawJob> {
-  // 공통 detail-extract: 본문 텍스트 → 없으면 공고 이미지 (iframe 포함)
+async function injectExtract(tabId: number): Promise<void> {
   try {
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
       files: [DETAIL_EXTRACT_SCRIPT],
     });
   } catch {
-    /* may already be injected or page not matchable */
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: [DETAIL_EXTRACT_SCRIPT],
+    });
   }
-  await sleep(600);
-  const res = await chrome.tabs.sendMessage(tabId, {
-    type: "EXTRACT_RAW",
-    timeoutMs,
-  });
-  if (!res?.ok || !res.raw) {
-    throw new Error(res?.error || "extract_failed");
-  }
-  return res.raw as RawJob;
 }
 
-async function structureJobIfNeeded(job: StoredJob): Promise<StoredJob> {
+async function snapsFromTab(tabId: number): Promise<FrameSnap[]> {
+  await injectExtract(tabId);
+  let ran: chrome.scripting.InjectionResult[];
+  try {
+    ran = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => {
+        const fn = (
+          globalThis as unknown as {
+            __jobscrapExtract?: () => Promise<unknown>;
+          }
+        ).__jobscrapExtract;
+        return fn ? fn() : null;
+      },
+    });
+  } catch {
+    ran = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const fn = (
+          globalThis as unknown as {
+            __jobscrapExtract?: () => Promise<unknown>;
+          }
+        ).__jobscrapExtract;
+        return fn ? fn() : null;
+      },
+    });
+  }
+  return ran
+    .map((r) => r.result as FrameSnap | null)
+    .filter((s): s is FrameSnap => !!s && typeof s.score === "number");
+}
+
+function snapToRaw(snap: FrameSnap, pageUrl: string, widened: boolean): RawJob {
+  const text = widened ? snap.widenedText || snap.text : snap.text;
+  const images = widened ? snap.widenedImages : snap.imageUrls;
+  const missing = widened ? snap.widenedMissing : snap.missing;
+  const needVision = missing.length > 0 && images.length > 0;
+  const note = describeGap(missing, images.length, text.length);
+  return {
+    url: pageUrl.split("#")[0],
+    title: snap.title,
+    companyName: snap.companyName || "회사 미상",
+    format: needVision ? "image" : text.length >= 40 ? "article" : "unknown",
+    rawText: text,
+    imageUrls: needVision ? images.slice(0, 5) : [],
+    salaryHint: "",
+    locationHint: "",
+    employmentHint: "",
+    deadlineHint: "",
+    scrapedAt: new Date().toISOString(),
+    extractNote: note || undefined,
+  };
+}
+
+async function extractFromTab(tabId: number, pageUrl: string): Promise<{
+  raw: RawJob;
+  wider: RawJob | null;
+}> {
+  const snaps = await snapsFromTab(tabId);
+  if (!snaps.length) {
+    throw new Error("프레임에 추출 스크립트를 넣지 못했습니다. 페이지를 새로고침한 뒤 다시 수집해 주세요.");
+  }
+  snaps.sort((a, b) => b.score - a.score);
+  const best = snaps[0];
+  const top = snaps.find((s) => s.isTop);
+  const company = best.companyName || top?.companyName || "";
+  const title = (best.isTop ? best.title : top?.title || best.title) || best.title;
+  const snap: FrameSnap = { ...best, companyName: company, title };
+  if (isEmptyExtract(snap.text.length, snap.imageUrls.length)) {
+    throw new Error(
+      snap.note ||
+        "글자가 거의 없고, 가로 400px·세로 300px 이상인 이미지도 없습니다. 영역 선택이 필요합니다."
+    );
+  }
+  const raw = snapToRaw(snap, pageUrl, false);
+  const wider =
+    snap.widenedText && snap.widenedText !== snap.text
+      ? snapToRaw(snap, pageUrl, true)
+      : null;
+  return { raw, wider };
+}
+
+function tagsEmpty(job: StoredJob): boolean {
+  if (job.roles.length > 1 && job.roles.every((r) => r.title.trim())) return false;
+  return job.roles.every(
+    (r) => !r.required.length && !r.preferred.length && !r.skills.length && !r.duties.length
+  );
+}
+
+function withNote(note: string | undefined, message: string): string {
+  if (!note || message.includes(note)) return message;
+  return `${note} ${message}`;
+}
+
+async function runAi(job: StoredJob): Promise<StoredJob> {
   const settings = await getSettings();
-  if (!settings.useAi) return job;
+  if (!settings.useAi) {
+    return { ...job, structureError: job.structureError || job.raw.extractNote || null };
+  }
   if (!settings.apiKey?.trim()) {
     return {
       ...job,
-      structureError: "API 키가 없어 원문만 저장했습니다.",
+      structureError: withNote(job.raw.extractNote, "API 키가 없어 원문만 저장했습니다."),
     };
   }
   try {
@@ -93,11 +178,44 @@ async function structureJobIfNeeded(job: StoredJob): Promise<StoredJob> {
       structureError: null,
     };
   } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
     return {
       ...job,
-      structureError: e instanceof Error ? e.message : String(e),
+      structureError: withNote(job.raw.extractNote, message),
     };
   }
+}
+
+async function structureJobIfNeeded(
+  job: StoredJob,
+  wider: RawJob | null = null
+): Promise<StoredJob> {
+  const first = await runAi(job);
+  if (!first.structuredAt || !tagsEmpty(first)) return first;
+  if (!wider || wider.rawText === job.raw.rawText) {
+    return {
+      ...first,
+      structureError: withNote(
+        first.raw.extractNote,
+        "필수 태그(r, p)가 비었습니다. 더 넓힐 부모 영역이 없습니다. 영역 선택이 필요합니다."
+      ),
+    };
+  }
+  const second = await runAi({ ...first, raw: wider, structureError: null });
+  if (!second.structuredAt) return second;
+  if (tagsEmpty(second)) {
+    return {
+      ...second,
+      structureError: withNote(
+        wider.extractNote,
+        "본문 범위를 한 단계 넓혀 재시도했지만 필수 태그(r, p)가 비었습니다. 영역 선택이 필요합니다."
+      ),
+    };
+  }
+  return {
+    ...second,
+    structureError: "필수 태그(r, p)가 비어 본문 범위를 한 단계 넓혀 다시 구조화했습니다.",
+  };
 }
 
 function rawToStored(raw: RawJob): StoredJob {
@@ -144,9 +262,9 @@ async function collectCurrentTab(): Promise<{
     };
   }
   try {
-    const raw = await extractFromTab(tab.id);
+    const { raw, wider } = await extractFromTab(tab.id, tab.url);
     let job = rawToStored(raw);
-    job = await structureJobIfNeeded(job);
+    job = await structureJobIfNeeded(job, wider);
     await upsertJob(job);
     return { ok: true, job };
   } catch (e) {
@@ -162,8 +280,90 @@ async function collectCurrentTab(): Promise<{
 
 /** 팝업 더블클릭 등으로 AI가 중복 호출되지 않게 */
 let collectLock = false;
+let pickTimer: ReturnType<typeof setTimeout> | undefined;
+
+function armPickTimeout() {
+  if (pickTimer) clearTimeout(pickTimer);
+  pickTimer = setTimeout(() => {
+    collectLock = false;
+    pickTimer = undefined;
+  }, 90000);
+}
+
+function clearPickTimeout() {
+  if (pickTimer) clearTimeout(pickTimer);
+  pickTimer = undefined;
+}
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === "PICK_REGION") {
+    if (collectLock) {
+      sendResponse({ ok: false, error: "이미 수집 중입니다. 잠시만 기다려 주세요." });
+      return false;
+    }
+    collectLock = true;
+    void (async () => {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id || !tab.url || !isHttpPageUrl(tab.url)) {
+        collectLock = false;
+        sendResponse({ ok: false, error: "http(s) 페이지에서만 영역을 고를 수 있습니다." });
+        return;
+      }
+      try {
+        await injectExtract(tab.id);
+        await chrome.tabs.sendMessage(tab.id, { type: "START_PICK" });
+        armPickTimeout();
+        sendResponse({ ok: true });
+      } catch (e) {
+        collectLock = false;
+        sendResponse({
+          ok: false,
+          error: e instanceof Error ? e.message : "영역 선택을 시작하지 못했습니다.",
+        });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === "REGION_PICKED") {
+    void (async () => {
+      try {
+        if (message.cancel) {
+          sendResponse({ ok: false, error: "영역 선택을 취소했습니다." });
+          return;
+        }
+        const snap = message.snap as FrameSnap | undefined;
+        const pageUrl = _sender.tab?.url || snap?.href || "";
+        if (!snap || !pageUrl || !isHttpPageUrl(pageUrl)) {
+          sendResponse({ ok: false, error: "선택한 영역의 페이지 주소를 알 수 없습니다." });
+          return;
+        }
+        if (isEmptyExtract(snap.text.length, snap.imageUrls.length)) {
+          sendResponse({
+            ok: false,
+            error:
+              snap.note ||
+              "선택한 영역에 글자가 거의 없고, 큰 이미지도 없습니다. 다른 영역을 선택해 주세요.",
+          });
+          return;
+        }
+        const raw = snapToRaw(snap, pageUrl, false);
+        const wider =
+          snap.widenedText && snap.widenedText !== snap.text
+            ? snapToRaw(snap, pageUrl, true)
+            : null;
+        let job = rawToStored(raw);
+        job = await structureJobIfNeeded(job, wider);
+        await upsertJob(job);
+        sendResponse({ ok: true, job });
+      } finally {
+        clearPickTimeout();
+        collectLock = false;
+      }
+    })();
+    return true;
+  }
+
   if (message.type === "COLLECT_CURRENT") {
     if (collectLock) {
       sendResponse({ ok: false, error: "이미 수집 중입니다. 잠시만 기다려 주세요." });

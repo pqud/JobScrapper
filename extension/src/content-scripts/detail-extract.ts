@@ -1,293 +1,262 @@
 /**
- * Site-agnostic detail extract:
- * 1) real article/template body text → article (text AI)
- * 2) else poster images (CDN / p.web) → image (vision)
- * 3) chrome-only sidebar text must NOT force article when posters exist
+ * 모든 프레임에서 본문 루트를 고른다.
+ * 글자 수(링크 안은 20%) + 큰 이미지 면적. nav/footer만 제외. aside는 포함.
+ * 자식 하나가 부모 점수의 70% 이상이면 그 자식으로 내려간다.
  */
 
-type JobFormat = "article" | "image" | "unknown";
+import {
+  describeGap,
+  imageCharScore,
+  isEmptyExtract,
+  missingSections,
+  soleHeavyChild,
+  textWeight,
+} from "../lib/content-root";
 
-interface RawJobPayload {
-  url: string;
+const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG"]);
+
+export interface FrameSnap {
+  href: string;
+  isTop: boolean;
   title: string;
   companyName: string;
-  format: JobFormat;
-  rawText: string;
+  score: number;
+  text: string;
   imageUrls: string[];
-  salaryHint: string;
-  locationHint: string;
-  employmentHint: string;
-  deadlineHint: string;
-  scrapedAt: string;
+  missing: string[];
+  widenedText: string;
+  widenedImages: string[];
+  widenedMissing: string[];
+  note: string | null;
 }
 
-const MIN_BODY_CHARS = 200;
-
-function isJunkImage(src: string, alt = ""): boolean {
-  const s = (src || "").toLowerCase();
-  const a = (alt || "").toLowerCase();
-  if (!s || s.startsWith("data:")) return true;
-  const deny = [
-    "logo",
-    "favicon",
-    "sprite",
-    "icon",
-    "blank.gif",
-    "spacer.gif",
-    "ads.",
-    "analytics",
-    "tracking",
-    "onepick-title",
-    "avatar",
-    "profile",
-  ];
-  return deny.some((d) => s.includes(d) || a.includes(d));
+interface Scored {
+  el: HTMLElement;
+  score: number;
+  images: string[];
+  parent: Scored | null;
+  children: Scored[];
 }
 
-function isPosterUrl(src: string): boolean {
-  return /file\d*\.jobkorea\.co\.kr|greetinghr|\/Mng\/|opening-attachments|cdn\.|attachments|static\.wanted\.co\.kr\/images/i.test(
-    src
-  );
+function excluded(el: Element): boolean {
+  if (el.matches("nav, footer, [role=navigation]")) return true;
+  const s = getComputedStyle(el);
+  if (s.display === "none") return true;
+  const r = el.getBoundingClientRect();
+  return r.width < 1 || r.height < 1;
 }
 
-function pageTitle(): string {
-  const h1 = document.querySelector("h1");
-  const t = (h1?.textContent || document.title || "")
-    .replace(/\s*[|｜].*$/, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  return t.slice(0, 200);
+function absUrl(src: string): string {
+  try {
+    return new URL(src, location.href).href;
+  } catch {
+    return "";
+  }
 }
 
-function pageCompany(): string {
-  const sels = [
-    ".coName",
-    "span.coName",
-    ".corp-name",
-    '[class*="company"] a',
-    '[data-company-name]',
-  ];
-  for (const sel of sels) {
-    const el = document.querySelector(sel);
-    if (!el) continue;
-    const t = (el.textContent || "").replace(/\s+/g, " ").trim();
-    if (t && t.length < 80 && !/잡코리아|원티드|wanted|채용정보/.test(t)) {
-      return t;
+function scoreTree(el: Element, parent: Scored | null): Scored | null {
+  if (!(el instanceof HTMLElement)) return null;
+  if (SKIP_TAGS.has(el.tagName) || el.id === "jobscrap-pick") return null;
+  if (excluded(el)) return null;
+
+  let score = 0;
+  const images: string[] = [];
+  const inLink = !!el.closest("a");
+  for (const node of el.childNodes) {
+    if (node.nodeType !== Node.TEXT_NODE) continue;
+    const chars = (node.textContent || "").replace(/\s+/g, "").length;
+    score += textWeight(chars, inLink);
+  }
+  if (el instanceof HTMLImageElement) {
+    const r = el.getBoundingClientRect();
+    const add = imageCharScore(r.width, r.height);
+    if (add > 0) {
+      score += add;
+      const src = absUrl(el.currentSrc || el.src || el.getAttribute("data-src") || "");
+      if (src && !src.startsWith("data:")) images.push(src);
     }
   }
-  const bracket = (document.title || "").match(/^\[([^\]]+)\]/);
-  if (bracket) return bracket[1].trim().slice(0, 80);
-  const m = (document.title || "").match(/^(.+?)\s*채용/);
-  return m ? m[1].trim().slice(0, 80) : "";
+
+  const node: Scored = { el, score, images, parent, children: [] };
+  for (const child of el.children) {
+    const sub = scoreTree(child, node);
+    if (!sub) continue;
+    node.children.push(sub);
+    node.score += sub.score;
+    node.images.push(...sub.images);
+  }
+  return node;
 }
 
-/** Real posting body — JobKorea selectors first, then SPA main (Wanted…). */
-function bodyTextFromDoc(doc: Document): string {
-  const sels = [
-    "ul.detail-section li.detail-article",
-    "li.detail-article",
-    ".view-content-detail",
-    ".artTplInner",
-    "#artTplInner",
-    "[class*='artTpl']",
-    ".tbDetail",
-    "#job-detail",
-    "p.web",
-    ".web",
-  ];
-  const chunks: string[] = [];
-  for (const sel of sels) {
-    for (const el of Array.from(doc.querySelectorAll(sel))) {
-      const t = ((el as HTMLElement).innerText || "").replace(/\n{3,}/g, "\n\n").trim();
-      if (t.length > 40) chunks.push(t);
+function descend(node: Scored): Scored {
+  const next = soleHeavyChild(node.score, node.children);
+  return next ? descend(next) : node;
+}
+
+function cleanText(el: HTMLElement): string {
+  return (el.innerText || "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .slice(0, 20000);
+}
+
+function guessCompany(): string {
+  const bits = [document.title || "", document.querySelector("h1")?.textContent || ""];
+  for (const raw of bits) {
+    const s = raw.replace(/\s+/g, " ").trim();
+    if (!s) continue;
+    const lead = s.match(/^(.+?)\s*채용/);
+    if (
+      lead &&
+      lead[1].trim().length < 40 &&
+      !/잡코리아|원티드|wanted|jobkorea/i.test(lead[1])
+    ) {
+      return lead[1].trim();
+    }
+    const bracket = s.match(/\[([^\]]{1,40})\]/);
+    if (bracket && !/잡코리아|원티드|wanted|jobkorea/i.test(bracket[1])) {
+      return bracket[1].trim();
     }
   }
-  const joined = chunks.join("\n\n").trim();
-  if (joined.length >= MIN_BODY_CHARS) return joined;
-
-  // Wanted 등 React SPA: 잡코리아용 class가 없음 → main/article 폴백
-  for (const sel of ["main", "[role='main']", "article"]) {
-    const el = doc.querySelector(sel) as HTMLElement | null;
-    if (!el) continue;
-    const t = (el.innerText || "").replace(/\n{3,}/g, "\n\n").trim();
-    if (t.length >= MIN_BODY_CHARS) return t;
-  }
-  return joined;
+  return "";
 }
 
-function collectBodyText(): string {
-  let best = bodyTextFromDoc(document);
-  for (const frame of Array.from(document.querySelectorAll("iframe"))) {
-    try {
-      const doc = frame.contentDocument;
-      if (!doc) continue;
-      const t = bodyTextFromDoc(doc);
-      if (t.length > best.length) best = t;
-    } catch {
-      /* cross-origin */
-    }
-  }
-  return best.slice(0, 20000);
-}
-
-function collectImages(): string[] {
-  const seen = new Set<string>();
-  const urls: string[] = [];
-
-  const add = (src: string, alt = "", prefer = false) => {
-    const s = src.trim();
-    if (!s || seen.has(s) || isJunkImage(s, alt)) return;
-    const abs = s.startsWith("//") ? `https:${s}` : s;
-    const poster = isPosterUrl(abs) || prefer;
-    if (!poster) {
-      // only keep non-CDN if looks large / file-like
-      if (!/\.(jpe?g|png|webp)(\?|$)/i.test(abs)) return;
-    }
-    seen.add(s);
-    urls.push(abs);
-  };
-
-  const scan = (root: Document | Element) => {
-    // Prefer known posting image containers first
-    for (const img of Array.from(
-      root.querySelectorAll("p.web img, .web img, .view-content-detail img")
-    )) {
-      add(
-        img.getAttribute("src") || img.getAttribute("data-src") || "",
-        img.getAttribute("alt") || "",
-        true
-      );
-    }
-    for (const img of Array.from(root.querySelectorAll("img"))) {
-      const src = img.getAttribute("src") || img.getAttribute("data-src") || "";
-      const alt = img.getAttribute("alt") || "";
-      const w = (img as HTMLImageElement).naturalWidth || img.width || 0;
-      const h = (img as HTMLImageElement).naturalHeight || img.height || 0;
-      if (isPosterUrl(src) || (w >= 400 && h >= 400)) {
-        add(src, alt, true);
-      }
-    }
-  };
-
-  scan(document);
-  for (const frame of Array.from(document.querySelectorAll("iframe"))) {
-    try {
-      const doc = frame.contentDocument;
-      if (doc) scan(doc);
-    } catch {
-      /* cross-origin */
-    }
-  }
-  // Posters first
-  urls.sort((a, b) => Number(isPosterUrl(b)) - Number(isPosterUrl(a)));
-  return urls.slice(0, 5);
-}
-
-function decideFormat(
-  bodyText: string,
-  imageUrls: string[]
-): JobFormat {
-  const posters = imageUrls.filter(isPosterUrl);
-  const hasBody = bodyText.length >= MIN_BODY_CHARS;
-  // Image posting: CDN posters / p.web images without a real text body
-  if (posters.length && !hasBody) return "image";
-  if (imageUrls.length && !hasBody) return "image";
-  if (hasBody) return "article";
-  if (posters.length || imageUrls.length) return "image";
-  if (bodyText.length >= 80) return "article";
-  return "unknown";
-}
-
-function extractOnce(): Omit<RawJobPayload, "scrapedAt"> & {
-  ready: boolean;
-} {
-  const url = location.href.split("#")[0];
-  const title = pageTitle();
-  const companyName = pageCompany() || "회사 미상";
-  const bodyText = collectBodyText();
-  const imageUrls = collectImages();
-  const format = decideFormat(bodyText, imageUrls);
-  const posters = imageUrls.filter(isPosterUrl);
-
-  // iframe 포스터/본문 올 때까지 대기 (사이드바만 있으면 ready=false)
-  const waitingForIframe =
-    !bodyText &&
-    !posters.length &&
-    document.querySelectorAll("iframe").length > 0;
-  const ready =
-    (format === "article" || format === "image") && !waitingForIframe;
-
+function pack(root: Scored, wider: Scored | null): FrameSnap {
+  const text = cleanText(root.el);
+  const imageUrls = [...new Set(root.images)].slice(0, 5);
+  const missing = missingSections(text);
+  const widenedText = wider ? cleanText(wider.el) : text;
+  const widenedImages = wider ? [...new Set(wider.images)].slice(0, 5) : imageUrls;
+  const widenedMissing = missingSections(widenedText);
+  const note = describeGap(missing, imageUrls.length, text.length);
   return {
-    url,
-    title,
-    companyName,
-    format,
-    rawText:
-      format === "image"
-        ? `[이미지 공고]\n` + imageUrls.map((u) => `- ${u}`).join("\n")
-        : bodyText,
-    imageUrls: format === "image" ? imageUrls : [],
-    salaryHint: "",
-    locationHint: "",
-    employmentHint: "",
-    deadlineHint: "",
-    ready,
+    href: location.href.split("#")[0],
+    isTop: window.top === window,
+    title: (document.querySelector("h1")?.textContent || document.title || "")
+      .replace(/\s*[|｜].*$/, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 200),
+    companyName: guessCompany(),
+    score: root.score,
+    text,
+    imageUrls,
+    missing,
+    widenedText,
+    widenedImages,
+    widenedMissing,
+    note,
   };
 }
 
-async function waitAndExtract(timeoutMs = 14000): Promise<RawJobPayload | null> {
-  const start = Date.now();
-  let last: ReturnType<typeof extractOnce> | null = null;
-  while (Date.now() - start < timeoutMs) {
-    last = extractOnce();
-    if (last.ready && (last.format === "article" || last.format === "image")) {
-      const { ready: _r, ...raw } = last;
-      return { ...raw, scrapedAt: new Date().toISOString() };
-    }
-    await new Promise((r) => setTimeout(r, 450));
-  }
-  if (last) {
-    // Timeout: prefer image if any poster/url survived
-    const format =
-      last.format !== "unknown"
-        ? last.format
-        : last.imageUrls.length
-          ? "image"
-          : last.rawText.length >= 80
-            ? "article"
-            : "unknown";
-    if (format === "unknown") return null;
-    const { ready: _r, ...rest } = last;
-    return {
-      ...rest,
-      format,
-      rawText:
-        format === "image"
-          ? `[이미지 공고]\n` + rest.imageUrls.map((u) => `- ${u}`).join("\n")
-          : rest.rawText,
-      imageUrls: format === "image" ? rest.imageUrls : [],
-      scrapedAt: new Date().toISOString(),
-    };
-  }
-  return null;
+function measure(): FrameSnap | null {
+  const body = document.body;
+  if (!body) return null;
+  const tree = scoreTree(body, null);
+  if (!tree) return null;
+  const root = descend(tree);
+  const wider = root.parent;
+  return pack(root, wider);
 }
+
+async function extractFrame(): Promise<FrameSnap | null> {
+  let snap = measure();
+  const start = Date.now();
+  while (
+    Date.now() - start < 8000 &&
+    (!snap || (snap.score < 200 && snap.imageUrls.length === 0))
+  ) {
+    await new Promise((r) => setTimeout(r, 400));
+    snap = measure();
+  }
+  return snap;
+}
+
+function snapFromElement(el: HTMLElement): FrameSnap {
+  const fake: Scored = {
+    el,
+    score: 1,
+    images: [],
+    parent: null,
+    children: [],
+  };
+  const tree = scoreTree(el, null) || fake;
+  const widerEl = el.parentElement;
+  const wider = widerEl ? scoreTree(widerEl, null) : null;
+  const snap = pack(tree, wider);
+  if (isEmptyExtract(snap.text.length, snap.imageUrls.length)) {
+    snap.note =
+      "선택한 영역에 글자가 거의 없고, 가로 400px·세로 300px 이상인 이미지도 없습니다.";
+  }
+  return snap;
+}
+
+function startPick() {
+  if (window.top !== window || document.getElementById("jobscrap-pick")) return;
+  const bar = document.createElement("div");
+  bar.id = "jobscrap-pick";
+  bar.textContent = "본문으로 쓸 영역을 클릭하세요. Esc로 취소";
+  bar.style.cssText =
+    "position:fixed;z-index:2147483647;left:12px;top:12px;padding:8px 12px;background:#1a1a1a;color:#fff;font:13px/1.4 sans-serif;border-radius:8px";
+  document.documentElement.appendChild(bar);
+  let prev: { el: HTMLElement; outline: string } | null = null;
+  const cleanup = () => {
+    if (prev) prev.el.style.outline = prev.outline;
+    bar.remove();
+    document.removeEventListener("mouseover", over, true);
+    document.removeEventListener("click", click, true);
+    document.removeEventListener("keydown", key, true);
+  };
+  const over = (e: MouseEvent) => {
+    const el = e.target;
+    if (!(el instanceof HTMLElement) || el === bar || bar.contains(el)) return;
+    if (prev?.el !== el) {
+      if (prev) prev.el.style.outline = prev.outline;
+      prev = { el, outline: el.style.outline };
+      el.style.outline = "2px solid #2f6feb";
+    }
+  };
+  const click = (e: MouseEvent) => {
+    const el = e.target;
+    if (!(el instanceof HTMLElement) || el === bar || bar.contains(el)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    cleanup();
+    chrome.runtime.sendMessage({
+      type: "REGION_PICKED",
+      snap: snapFromElement(el),
+    });
+  };
+  const key = (e: KeyboardEvent) => {
+    if (e.key !== "Escape") return;
+    cleanup();
+    chrome.runtime.sendMessage({ type: "REGION_PICKED", cancel: true });
+  };
+  document.addEventListener("mouseover", over, true);
+  document.addEventListener("click", click, true);
+  document.addEventListener("keydown", key, true);
+}
+
+const g = globalThis as unknown as {
+  __jobscrapExtract?: () => Promise<FrameSnap | null>;
+  __jobscrapBound?: boolean;
+};
+g.__jobscrapExtract = extractFrame;
 
 try {
-  if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
+  if (
+    !g.__jobscrapBound &&
+    typeof chrome !== "undefined" &&
+    chrome.runtime?.onMessage &&
+    window.top === window
+  ) {
+    g.__jobscrapBound = true;
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      if (message?.type === "EXTRACT_RAW") {
-        void waitAndExtract(message.timeoutMs ?? 14000)
-          .then((raw) => {
-            if (!raw) sendResponse({ ok: false, error: "extract_failed" });
-            else sendResponse({ ok: true, raw });
-          })
-          .catch((err) => {
-            sendResponse({
-              ok: false,
-              error: err instanceof Error ? err.message : "extract_error",
-            });
-          });
-        return true;
+      if (message?.type === "START_PICK") {
+        startPick();
+        sendResponse({ ok: true });
+        return false;
       }
       return false;
     });

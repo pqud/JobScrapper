@@ -104,7 +104,11 @@ const SORTED = [...TECH_KEYWORDS].sort((a, b) => b.length - a.length);
 
 export function extractKeywords(description: string): string[] {
   if (!description) return [];
-  const lower = description.toLowerCase();
+  // NextJS / NestJS (no dot) still match VOCAB "Next.js" / "NestJS"
+  const lower = description
+    .toLowerCase()
+    .replace(/next\s*\.?js/g, "next.js")
+    .replace(/nest\s*\.?js/g, "nestjs");
   const found = SORTED.filter((kw) => lower.includes(kw.toLowerCase()));
   return [...new Set(found)].sort((a, b) =>
     a.toLowerCase().localeCompare(b.toLowerCase())

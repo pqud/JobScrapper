@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/build.mjs",
-    "build": "tsc --noEmit && node scripts/build.mjs",
+    "build": "node --experimental-strip-types scripts/check-content-root.ts && tsc --noEmit && node scripts/build.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

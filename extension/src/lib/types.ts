@@ -23,6 +23,8 @@ export interface RawJob {
   employmentHint: string;
   deadlineHint: string;
   scrapedAt: string;
+  /** 추출이 남긴 이유. 실패할 때만 사용자에게 보여 준다. */
+  extractNote?: string;
 }
 
 export interface StructuredRole {

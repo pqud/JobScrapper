@@ -78,6 +78,24 @@ export function Popup() {
     });
   };
 
+  const onPick = () => {
+    if (busy) return;
+    setBusy(true);
+    setStatus("영역 선택 준비 중…");
+    chrome.runtime.sendMessage({ type: "PICK_REGION" }, (res) => {
+      setBusy(false);
+      if (chrome.runtime.lastError) {
+        setStatus(chrome.runtime.lastError.message || "영역 선택을 시작하지 못했습니다.");
+        return;
+      }
+      setStatus(
+        res?.ok
+          ? "페이지에서 본문 영역을 클릭하세요. Esc로 취소."
+          : res?.error || "영역 선택을 시작하지 못했습니다."
+      );
+    });
+  };
+
   const onExport = () => {
     chrome.runtime.sendMessage({ type: "EXPORT_JSON" }, (res) => {
       if (!res?.json) return;
@@ -194,6 +212,13 @@ export function Popup() {
         >
           {busy ? "수집 중…" : "현재 탭 수집"}
         </button>
+        {status.includes("영역 선택") ||
+        status.includes("영역을 클릭") ||
+        jobs.some((j) => j.structureError?.includes("영역 선택")) ? (
+          <button type="button" style={s.linkBtn} disabled={busy} onClick={onPick}>
+            영역 선택
+          </button>
+        ) : null}
       </section>
 
       {status ? <p style={s.status}>{status}</p> : null}
