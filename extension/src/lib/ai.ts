@@ -4,6 +4,14 @@ import type {
   StructuredRole,
 } from "./types";
 import { extractKeywords, TECH_KEYWORDS } from "./keyword-extractor";
+import {
+  careerLabel,
+  deadlineFromText,
+  isCareerBlob,
+  missingSections,
+  sliceForRole,
+  splitJobSections,
+} from "./content-root";
 import type { CatKey } from "./tech-taxonomy";
 import { estimateUsd } from "./usage";
 
@@ -21,6 +29,8 @@ export interface AiStructureResult {
     required: string[];
     preferred: string[];
     skills: string[];
+    loc?: string;
+    exp?: string;
   }>;
 }
 
@@ -45,12 +55,21 @@ type CompactRole = {
   r?: unknown;
   p?: unknown;
   x?: unknown;
+  /** 경력조건. 신입, 경력 3년 이상 */
+  y?: string;
+  /** 근무지 */
+  loc?: string;
 };
 
 type CompactPayload = CompactRole & {
   /** company name (short) — often only visible inside poster image */
   co?: string;
   rs?: CompactRole[];
+  sal?: string;
+  emp?: string;
+  /** 마감. 시간이 있으면 포함 (2026.10.30 4시) */
+  dl?: string;
+  loc?: string;
 };
 
 const VOCAB = TECH_KEYWORDS.join(",");
@@ -58,18 +77,22 @@ const VOCAB = TECH_KEYWORDS.join(",");
 const SYSTEM = `Job posting → compact JSON only. No markdown, no prose, no quotes, no transcription.
 
 Schema (single role):
-{"co":"Acme","c":"fe","r":["React","TypeScript"],"p":["Next.js"],"x":["3y+"]}
+{"co":"Acme","c":"fe","y":"경력 3년 이상","r":["React","TypeScript"],"p":["Next.js"],"x":[]}
 
 Several jobs on one page — one rs item per job, never merged:
-{"co":"Acme","rs":[{"c":"etc","t":"기계","r":[],"p":[],"x":["기계","서울"]},{"c":"fe","t":"SW Engineering","r":[],"p":["Java","Python"],"x":[]},{"c":"be","t":"Cloud/Infra","r":["AWS","Azure"],"p":[],"x":[]}]}
+{"co":"Acme","rs":[{"c":"etc","t":"기계","r":[],"p":[],"x":["기계"]},{"c":"fe","t":"SW Engineering","r":[],"p":["Java","Python"],"x":[]},{"c":"be","t":"Cloud/Infra","r":["AWS","Azure"],"p":[],"x":[]}]}
 
 Keys:
-co=company name ≤40 chars (from page or poster image). Real company only — not JobKorea/Wanted.
+co=company name only. Not the post title.
 c=category one of fe|data|ai|be|game|etc. Non-software jobs (기계, 영업, 마케팅, 재무, 품질) → etc. Cloud/infra → be. AI/AX → ai.
-r=required VOCAB in 자격요건/필수/수행업무/담당업무 (exact spelling)
-p=VOCAB listed under 우대/우대사항 only
-x=short extras (major, city, 3y+) — max 4 per role, each ≤16 chars. Not full sentences.
-t=that job's own title, Korean allowed, ≤40 chars. Required when there are 2+ jobs.
+r=required VOCAB in 자격요건/지원자격/필수.
+p=VOCAB under 주요업무/담당업무/수행업무/업무내용/우대/우대사항. Not 자격요건.
+y=career only, ≤24 chars: 신입, 경력 3년 이상, 경력무관, 신입/경력. Not a skill.
+x=short extras (major) — max 4 per role, each ≤16 chars. Not the workplace, not career years.
+t=that job's own title, Korean allowed, ≤40 chars.
+loc=that job's 근무지 ≤24 chars (e.g. 신사본점). One loc on the root if every job shares it.
+sal=pay from 근무조건/급여 ≤40 chars (e.g. 초임 4,641만원). emp=고용형태 ≤16 chars (e.g. 정규직).
+dl=마감 ≤32 chars. Include the clock when the post shows one: 10월 30일 4시 → 2026.10.30 4시, 오전 12시 → 2026.10.26 오전 12시. No time on the page → date only. Do not invent a time.
 
 VOCAB (r/p must be exact strings from this list only; Korean entries allowed if listed):
 ${VOCAB}
@@ -78,9 +101,11 @@ Rules:
 1) Output JSON object only. No explanations.
 2) Do NOT copy/transcribe posting text into the JSON.
 3) r/p: only exact VOCAB strings. Not in VOCAB → omit. Do not invent synonyms.
-4) One page, many jobs: a table row (모집부문/모집직무/전공/근무지) is one job. A block with its own 수행업무 and 우대사항 is one job. Emit every row or block, up to 20. Do not collapse them into one role. A row with no VOCAB still needs t and may have empty r/p.
-5) Within one job, include every VOCAB term in that job's text. Do not move another job's skills into this one.
-6) Always include co when readable (esp. image posters). Omit salary/location/deadline.`;
+4) One page, many jobs: each 담당업무 block or table row is one job. VOCAB in 주요업무/담당업무/수행업무 goes to p. VOCAB in 자격요건/지원자격 goes to r. Do not put 주요업무 skills in r. C언어 → C.
+5) Do not copy another job's skills. A finance row with no tech stays empty. The IT row keeps its own stack.
+6) Always include co, sal, emp, loc, and dl when the poster shows them.
+7) 고용조건/근무조건/복지/인턴/4대보험/정규직 전환 is employment, not 자격요건. Put the form in emp only. If 자격요건 has no VOCAB skill, r is []. Never copy those bullets into r, p, or x.
+8) 신입/경력/n년 이상/경력무관 goes to y only, even when it sits inside 자격요건. Never put it in r, p, or x.`;
 
 const MAX_OUT_TOKENS = 2048;
 const MAX_VISION_IMAGES = 3;
@@ -114,6 +139,10 @@ const TECH_ALIAS: Record<string, string> = {
   "computer vision": "Computer Vision",
   "ci/cd": "CI/CD",
   "github actions": "GitHub Actions",
+  c언어: "C",
+  "c language": "C",
+  oracle: "Oracle",
+  rdbms: "RDBMS",
 };
 
 const TECH_BY_LOWER = new Map(
@@ -126,15 +155,14 @@ function absoluteUrl(src: string): string {
   return src;
 }
 
-function buildUserPayload(raw: RawJob): string {
-  const withImages = raw.imageUrls.length > 0;
+function buildUserPayload(raw: RawJob, attachImages: boolean): string {
   return JSON.stringify({
-    format: withImages ? "text+image" : "text",
+    format: attachImages ? "text+image" : "text",
     title: raw.title,
     companyName: raw.companyName,
     text: raw.rawText.slice(0, 10000),
-    instruction: withImages
-      ? "Text may miss a section. Images attached. Do NOT transcribe. Emit compact schema JSON only."
+    instruction: attachImages
+      ? "Read the image table. Each job block has its own 자격요건 cell. Extract VOCAB skills, y, sal, emp, loc. Do not paste paragraphs."
       : undefined,
   });
 }
@@ -237,15 +265,18 @@ function compactToRoles(
     .map((row, i) => {
       const required = techArr(row.r);
       const preferred = techArr(row.p);
-      const extras = extraArr(row.x);
+      const rawExtras = extraArr(row.x);
+      const extras = rawExtras.filter((d) => !isCareerBlob(d));
+      const exp = careerLabel(clip(row.y, 24)) || clip(row.y, 24) || careerLabel(rawExtras.join(" "));
       const explicit = String(row.t || "").trim().slice(0, 40);
-      const hasBody = required.length + preferred.length + extras.length > 0;
+      const hasBody = required.length + preferred.length + extras.length > 0 || !!exp;
       if (rows.length > 1 && !explicit && !hasBody) return null;
       const cat = parseCat(row.c);
       const title =
         explicit ||
         (rows.length > 1 ? `${raw.title || "Role"} ${i + 1}` : raw.title) ||
         "Role";
+      const loc = clip(row.loc, 40);
       return {
         title,
         cat,
@@ -253,6 +284,8 @@ function compactToRoles(
         required,
         preferred,
         skills: [], // required에만 두고 job-map이 required 사용 (중복 방지)
+        ...(loc ? { loc } : {}),
+        ...(exp ? { exp } : {}),
       };
     })
     .filter((r): r is NonNullable<typeof r> => !!r && !!(r.required.length || r.preferred.length || r.duties.length || r.title));
@@ -282,38 +315,114 @@ function pickCompany(aiCo: unknown, raw: RawJob): string {
   return fromPage || fromAi || "회사 미상";
 }
 
-/** AI often under-lists; fill VOCAB hits from title + raw text (incl. image jobs' titles). */
+/** 직무마다 자기 구간만 본다. 주요업무·우대는 p, 자격요건만 r. */
 function fillMissingVocabFromText(
   roles: AiStructureResult["roles"],
   raw: RawJob
 ): AiStructureResult["roles"] {
-  if (!roles.length || roles.length > 1) return roles;
-  const found = extractKeywords(
-    `${raw.title}\n${raw.companyName}\n${raw.rawText}`
-  );
-  if (!found.length) return roles;
-  return roles.map((role, i) => {
-    if (i > 0) return role;
-    const have = new Set(
-      [...role.required, ...role.preferred].map((s) => s.toLowerCase())
-    );
-    const add = found.filter((t) => !have.has(t.toLowerCase()));
-    return add.length ? { ...role, required: [...role.required, ...add] } : role;
+  const text = raw.rawText || "";
+  const titles = roles.map((r) => r.title || "");
+  return roles.map((role) => {
+    const slice =
+      sliceForRole(
+        text,
+        role.title || "",
+        titles.filter((t) => t !== role.title)
+      ) || (roles.length === 1 ? text : "");
+    if (!slice) return role;
+    const { duty, required, preferred, employment } = splitJobSections(slice);
+    const prefList = extractKeywords(`${duty}\n${preferred}`);
+    const reqList = extractKeywords(required);
+    const empList = extractKeywords(employment);
+    const prefSet = new Set(prefList.map((t) => t.toLowerCase()));
+    const reqSet = new Set(reqList.map((t) => t.toLowerCase()));
+    const empSet = new Set(empList.map((t) => t.toLowerCase()));
+    const onlyEmp = (t: string) =>
+      empSet.has(t.toLowerCase()) && !reqSet.has(t.toLowerCase()) && !prefSet.has(t.toLowerCase());
+    const fromEmpText = (t: string) =>
+      employment.includes(t) && !required.includes(t) && !duty.includes(t) && !preferred.includes(t);
+    if (!prefSet.size && !reqSet.size && !employment.trim()) return role;
+    const isReq = (t: string) => reqSet.has(t.toLowerCase());
+    const isPref = (t: string) => prefSet.has(t.toLowerCase());
+    const requiredOut = [
+      ...role.required.filter((t) => (isReq(t) || !isPref(t)) && !onlyEmp(t) && !fromEmpText(t)),
+      ...reqList,
+    ];
+    const seenR = new Set<string>();
+    const requiredDedup = requiredOut.filter((t) => {
+      const k = t.toLowerCase();
+      if (seenR.has(k) || (isPref(t) && !isReq(t))) return false;
+      seenR.add(k);
+      return true;
+    });
+    const preferredDedup: string[] = [];
+    const seenP = new Set<string>();
+    for (const t of [...role.preferred.filter((x) => !isReq(x) && !onlyEmp(x) && !fromEmpText(x)), ...prefList]) {
+      const k = t.toLowerCase();
+      if (seenP.has(k) || seenR.has(k) || isReq(t)) continue;
+      seenP.add(k);
+      preferredDedup.push(t);
+    }
+    return {
+      ...role,
+      duties: role.duties.filter((d) => !fromEmpText(d)),
+      required: requiredDedup,
+      preferred: preferredDedup,
+    };
   });
+}
+
+function applyCareer(
+  roles: AiStructureResult["roles"],
+  raw: RawJob
+): AiStructureResult["roles"] {
+  const text = raw.rawText || "";
+  const titles = roles.map((r) => r.title || "");
+  return roles.map((role) => {
+    const slice =
+      sliceForRole(
+        text,
+        role.title || "",
+        titles.filter((t) => t !== role.title)
+      ) || (roles.length === 1 ? text : "");
+    const fromText = careerLabel(slice);
+    const exp =
+      (fromText && /년|무관|미만|이상/.test(fromText) ? fromText : "") ||
+      role.exp ||
+      fromText;
+    const duties = role.duties.filter((d) => !isCareerBlob(d));
+    return exp ? { ...role, duties, exp } : { ...role, duties };
+  });
+}
+
+function clip(v: unknown, max: number): string {
+  return String(v || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
 }
 
 function normalizeResult(
   payload: CompactPayload,
   raw: RawJob
 ): AiStructureResult {
+  const roles = applyCareer(fillMissingVocabFromText(compactToRoles(payload, raw), raw), raw);
+  const roleLocs = [
+    ...new Set(roles.map((r) => r.loc).filter((s): s is string => !!s)),
+  ];
   return {
     companyName: pickCompany(payload.co, raw),
     title: raw.title,
-    deadline: raw.deadlineHint || null,
-    salary: raw.salaryHint || null,
-    location: raw.locationHint || null,
-    employmentType: raw.employmentHint || null,
-    roles: fillMissingVocabFromText(compactToRoles(payload, raw), raw),
+    deadline:
+      deadlineFromText(raw.rawText) || clip(payload.dl, 40) || raw.deadlineHint || null,
+    salary: clip(payload.sal, 60) || raw.salaryHint || null,
+    location:
+      clip(payload.loc, 40) ||
+      (roleLocs.length ? roleLocs.join(" · ") : "") ||
+      raw.locationHint ||
+      null,
+    employmentType: clip(payload.emp, 24) || raw.employmentHint || null,
+    roles,
   };
 }
 
@@ -326,6 +435,8 @@ export function toStructuredRoles(data: AiStructureResult): StructuredRole[] {
     required: r.required,
     preferred: r.preferred,
     skills: r.skills,
+    ...(r.loc ? { loc: r.loc } : {}),
+    ...(r.exp ? { exp: r.exp } : {}),
   }));
 }
 
@@ -441,10 +552,17 @@ function packUsage(
   };
 }
 
+/** 담당업무·자격요건이 글에 있으면 회사 사진 등 이미지를 보내지 않는다. */
+function textCoversCoreSections(raw: RawJob): boolean {
+  const missing = missingSections(raw.rawText || "");
+  return !missing.includes("담당업무") && !missing.includes("자격요건");
+}
+
 function userInstruction(raw: RawJob): string {
   const must =
-    'Return ONE complete JSON object and stop. If several jobs are listed, use rs with one item each. Example: {"co":"Acme","rs":[{"c":"etc","t":"기계","r":[],"p":[],"x":["서울"]},{"c":"be","t":"Cloud","r":["AWS"],"p":["Python"],"x":[]}]}. Max 12 VOCAB tags per role, not for the whole page. Close all brackets.';
-  return `${must}\n${buildUserPayload(raw)}`;
+    'Return ONE complete JSON object and stop. If several jobs are listed, use rs with one item each. Read each 자격요건 cell. Career years go to y, not r/p/x. Example: {"co":"Acme","sal":"초임 4,641만원","emp":"정규직","dl":"2026.10.30 4시","rs":[{"c":"etc","t":"금융일반","y":"신입","r":[],"p":[],"loc":"신사본점"},{"c":"be","t":"IT전산","y":"경력 3년 이상","r":[],"p":["C","Java","Spring","SQL","Oracle","MySQL"],"loc":"신사본점"}]}. Max 12 VOCAB tags per role. Close all brackets.';
+  const attachImages = raw.imageUrls.length > 0 && !textCoversCoreSections(raw);
+  return `${must}\n${buildUserPayload(raw, attachImages)}`;
 }
 
 async function callOpenAI(
@@ -455,14 +573,20 @@ async function callOpenAI(
   const content: Array<Record<string, unknown>> = [
     { type: "text", text: userInstruction(raw) },
   ];
-  const images = await loadVisionImages(raw);
+  const skipImages = textCoversCoreSections(raw);
+  const images = skipImages ? [] : await loadVisionImages(raw);
   for (const img of images) {
     content.push({
       type: "image_url",
       image_url: { url: `data:${img.mediaType};base64,${img.base64}` },
     });
   }
-  if (raw.imageUrls.length && !images.length && raw.rawText.trim().length < 40) {
+  if (
+    !skipImages &&
+    raw.imageUrls.length &&
+    !images.length &&
+    raw.rawText.trim().length < 40
+  ) {
     throw new Error(
       `큰 이미지 ${raw.imageUrls.length}장을 불러오지 못했고, 대신 쓸 글자도 없습니다.`
     );
@@ -510,7 +634,8 @@ async function callAnthropic(
 ): Promise<AiStructureCall> {
   const model = settings.anthropicModel || "claude-haiku-5-5";
   const content: Array<Record<string, unknown>> = [];
-  const images = await loadVisionImages(raw);
+  const skipImages = textCoversCoreSections(raw);
+  const images = skipImages ? [] : await loadVisionImages(raw);
   for (const img of images) {
     content.push({
       type: "image",
@@ -522,7 +647,12 @@ async function callAnthropic(
     });
   }
   content.push({ type: "text", text: userInstruction(raw) });
-  if (raw.imageUrls.length && !images.length && raw.rawText.trim().length < 40) {
+  if (
+    !skipImages &&
+    raw.imageUrls.length &&
+    !images.length &&
+    raw.rawText.trim().length < 40
+  ) {
     throw new Error(
       `큰 이미지 ${raw.imageUrls.length}장을 불러오지 못했고, 대신 쓸 글자도 없습니다.`
     );

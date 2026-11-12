@@ -1,6 +1,7 @@
 /**
  * 모든 프레임에서 본문 루트를 고른다.
  * 글자 수(링크 안은 20%) + 큰 이미지 면적. nav/footer만 제외. aside는 포함.
+ * 본문으로 내려가면 형제인 상단 줄(header, 마감·건물)은 텍스트 앞에 붙인다.
  * 자식 하나가 부모 점수의 70% 이상이면 그 자식으로 내려간다.
  */
 
@@ -8,6 +9,7 @@ import {
   describeGap,
   imageCharScore,
   isEmptyExtract,
+  metaLines,
   missingSections,
   soleHeavyChild,
   textWeight,
@@ -101,6 +103,54 @@ function cleanText(el: HTMLElement): string {
     .slice(0, 20000);
 }
 
+function outsideText(el: HTMLElement, root: HTMLElement): string {
+  if (el === root || !el.contains(root)) return el.innerText || "";
+  const clone = el.cloneNode(true) as HTMLElement;
+  const indices: number[] = [];
+  let cur: HTMLElement | null = root;
+  while (cur && cur !== el) {
+    const parent: HTMLElement | null = cur.parentElement;
+    if (!parent) return "";
+    indices.push([...parent.children].indexOf(cur));
+    cur = parent;
+  }
+  let target: Element | null = clone;
+  for (const i of indices.reverse()) target = target?.children[i] || null;
+  target?.remove();
+  return clone.innerText || "";
+}
+
+function metaBeside(root: Scored): string {
+  const chunks: string[] = [];
+  const seen = new Set<HTMLElement>();
+  const take = (el: HTMLElement) => {
+    if (seen.has(el) || el === root.el) return;
+    if (el.matches("nav, footer, [role=navigation]")) return;
+    const s = getComputedStyle(el);
+    if (s.display === "none" || s.visibility === "hidden") return;
+    seen.add(el);
+    const lines = metaLines(outsideText(el, root.el));
+    if (lines) chunks.push(lines);
+  };
+  document.querySelectorAll("header").forEach((el) => {
+    if (el instanceof HTMLElement) take(el);
+  });
+  let node: Scored | null = root;
+  while (node?.parent) {
+    for (const sib of node.parent.children) {
+      if (sib !== node) take(sib.el);
+    }
+    node = node.parent;
+  }
+  return [...new Set(chunks)].join("\n");
+}
+
+function withMeta(root: Scored, body: string): string {
+  const extra = metaBeside(root);
+  if (!extra || body.includes(extra.slice(0, 24))) return body;
+  return `${extra}\n\n${body}`;
+}
+
 function guessCompany(): string {
   const bits = [document.title || "", document.querySelector("h1")?.textContent || ""];
   for (const raw of bits) {
@@ -123,10 +173,10 @@ function guessCompany(): string {
 }
 
 function pack(root: Scored, wider: Scored | null): FrameSnap {
-  const text = cleanText(root.el);
+  const text = withMeta(root, cleanText(root.el));
   const imageUrls = [...new Set(root.images)].slice(0, 5);
   const missing = missingSections(text);
-  const widenedText = wider ? cleanText(wider.el) : text;
+  const widenedText = wider ? withMeta(root, cleanText(wider.el)) : text;
   const widenedImages = wider ? [...new Set(wider.images)].slice(0, 5) : imageUrls;
   const widenedMissing = missingSections(widenedText);
   const note = describeGap(missing, imageUrls.length, text.length);
@@ -192,17 +242,56 @@ function snapFromElement(el: HTMLElement): FrameSnap {
   return snap;
 }
 
-function startPick() {
-  if (window.top !== window || document.getElementById("jobscrap-pick")) return;
+const PICK_BAR_ID = "jobscrap-pick";
+const PICKED_BAR_ID = "jobscrap-picked";
+const PICKED_OUTLINE = "2px solid #2f6feb";
+
+let lockedPick: { el: HTMLElement; outline: string } | null = null;
+
+function clearLockedPick() {
+  if (lockedPick) {
+    lockedPick.el.style.outline = lockedPick.outline;
+    lockedPick = null;
+  }
+  document.getElementById(PICKED_BAR_ID)?.remove();
+}
+
+function showPickedBar() {
+  if (!lockedPick || document.getElementById(PICKED_BAR_ID)) return;
   const bar = document.createElement("div");
-  bar.id = "jobscrap-pick";
+  bar.id = PICKED_BAR_ID;
+  bar.textContent = "영역 선택됨 · 확장 팝업에서「현재 영역 수집」";
+  bar.style.cssText =
+    "position:fixed;z-index:2147483647;left:12px;top:12px;padding:8px 12px;background:#1a1a1a;color:#fff;font:13px/1.4 sans-serif;border-radius:8px;max-width:min(420px,90vw)";
+  document.documentElement.appendChild(bar);
+}
+
+function lockPick(el: HTMLElement, savedOutline: string) {
+  clearLockedPick();
+  lockedPick = { el, outline: savedOutline };
+  el.style.outline = PICKED_OUTLINE;
+  showPickedBar();
+}
+
+function startPick() {
+  if (window.top !== window || document.getElementById(PICK_BAR_ID)) return;
+  document.getElementById(PICKED_BAR_ID)?.remove();
+  const bar = document.createElement("div");
+  bar.id = PICK_BAR_ID;
   bar.textContent = "본문으로 쓸 영역을 클릭하세요. Esc로 취소";
   bar.style.cssText =
     "position:fixed;z-index:2147483647;left:12px;top:12px;padding:8px 12px;background:#1a1a1a;color:#fff;font:13px/1.4 sans-serif;border-radius:8px";
   document.documentElement.appendChild(bar);
   let prev: { el: HTMLElement; outline: string } | null = null;
   const cleanup = () => {
-    if (prev) prev.el.style.outline = prev.outline;
+    if (prev) {
+      if (lockedPick && prev.el === lockedPick.el) {
+        prev.el.style.outline = PICKED_OUTLINE;
+      } else {
+        prev.el.style.outline = prev.outline;
+      }
+      prev = null;
+    }
     bar.remove();
     document.removeEventListener("mouseover", over, true);
     document.removeEventListener("click", click, true);
@@ -212,9 +301,17 @@ function startPick() {
     const el = e.target;
     if (!(el instanceof HTMLElement) || el === bar || bar.contains(el)) return;
     if (prev?.el !== el) {
-      if (prev) prev.el.style.outline = prev.outline;
-      prev = { el, outline: el.style.outline };
-      el.style.outline = "2px solid #2f6feb";
+      if (prev) {
+        if (lockedPick && prev.el === lockedPick.el) {
+          prev.el.style.outline = PICKED_OUTLINE;
+        } else {
+          prev.el.style.outline = prev.outline;
+        }
+      }
+      const base =
+        lockedPick && el === lockedPick.el ? lockedPick.outline : el.style.outline;
+      prev = { el, outline: base };
+      el.style.outline = PICKED_OUTLINE;
     }
   };
   const click = (e: MouseEvent) => {
@@ -222,15 +319,46 @@ function startPick() {
     if (!(el instanceof HTMLElement) || el === bar || bar.contains(el)) return;
     e.preventDefault();
     e.stopPropagation();
+    const savedOutline =
+      lockedPick && el === lockedPick.el
+        ? lockedPick.outline
+        : prev?.el === el
+          ? prev.outline
+          : el.style.outline;
+    if (prev) {
+      if (lockedPick && prev.el === lockedPick.el) {
+        prev.el.style.outline = PICKED_OUTLINE;
+      } else {
+        prev.el.style.outline = prev.outline;
+      }
+      prev = null;
+    }
     cleanup();
-    chrome.runtime.sendMessage({
-      type: "REGION_PICKED",
-      snap: snapFromElement(el),
+    const snap = snapFromElement(el);
+    // MV3: 응답을 기다려야 SW가 storage 쓰기 전에 죽지 않는다.
+    chrome.runtime.sendMessage({ type: "REGION_PICKED", snap }, (res) => {
+      if (chrome.runtime.lastError || !res?.ok) {
+        clearLockedPick();
+        const err =
+          chrome.runtime.lastError?.message ||
+          res?.error ||
+          "영역 저장에 실패했습니다.";
+        const fail = document.createElement("div");
+        fail.id = PICKED_BAR_ID;
+        fail.textContent = err;
+        fail.style.cssText =
+          "position:fixed;z-index:2147483647;left:12px;top:12px;padding:8px 12px;background:#7a1f1f;color:#fff;font:13px/1.4 sans-serif;border-radius:8px;max-width:min(420px,90vw)";
+        document.documentElement.appendChild(fail);
+        setTimeout(() => fail.remove(), 4000);
+        return;
+      }
+      lockPick(el, savedOutline);
     });
   };
   const key = (e: KeyboardEvent) => {
     if (e.key !== "Escape") return;
     cleanup();
+    showPickedBar();
     chrome.runtime.sendMessage({ type: "REGION_PICKED", cancel: true });
   };
   document.addEventListener("mouseover", over, true);
@@ -255,6 +383,11 @@ try {
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type === "START_PICK") {
         startPick();
+        sendResponse({ ok: true });
+        return false;
+      }
+      if (message?.type === "CLEAR_PICK") {
+        clearLockedPick();
         sendResponse({ ok: true });
         return false;
       }

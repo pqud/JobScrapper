@@ -18,6 +18,7 @@ export type Posting = {
   role: string;
   loc: string;
   sal: string;
+  career: string;
   dl: string;
   pos: string;
   cat: CatKey;
@@ -52,7 +53,14 @@ function parseDeadline(s: string | null | undefined): {
   if (m) {
     const date = new Date(+m[1], +m[2] - 1, +m[3]);
     date.setHours(0, 0, 0, 0);
-    const label = `${m[1]}.${String(m[2]).padStart(2, "0")}.${String(m[3]).padStart(2, "0")}`;
+    const day = `${m[1]}.${String(m[2]).padStart(2, "0")}.${String(m[3]).padStart(2, "0")}`;
+    const rest = raw.slice((m.index || 0) + m[0].length);
+    const clock = rest.match(
+      /^\s*((?:오전|오후|AM|PM)\s+)?\d{1,2}\s*시(?!간)(?:\s*\d{1,2}\s*분)?|^\s*\d{1,2}:\d{2}/i
+    );
+    const label = clock
+      ? `${day} ${clock[0].replace(/\s+/g, " ").trim()}`
+      : day;
     return { label, date };
   }
   return { label: raw.slice(0, 24), date: null };
@@ -126,8 +134,9 @@ export function jobsToPostings(jobs: StoredJob[]): Posting[] {
         jobId: job.id,
         co: job.raw.companyName || "회사 미상",
         role: roleTitle,
-        loc: job.location || job.raw.locationHint || "",
+        loc: role.loc || job.location || job.raw.locationHint || "",
         sal: job.salary || job.raw.salaryHint || "",
+        career: role.exp || "",
         dl,
         pos: job.employmentType || job.raw.employmentHint || "",
         cat,

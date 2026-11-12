@@ -57,16 +57,6 @@ table.mx {
   background: var(--color-surface);
   z-index: 3;
 }
-.mx .r1 th {
-  top: 0;
-  height: 28px;
-  text-align: left;
-  font-weight: 700;
-  padding: 0 8px;
-  border-left: 1px solid var(--color-line);
-  white-space: nowrap;
-}
-/* Equal skill columns — width locked so long labels don't stretch cells */
 .mx .r2 th:not(.rl),
 .mx .r3 th:not(.rl),
 .mx tbody td {
@@ -75,13 +65,13 @@ table.mx {
   max-width: 36px;
 }
 .mx .r2 th {
-  top: 28px;
+  top: 0;
   height: 200px;
   vertical-align: bottom;
   overflow: visible;
 }
 .mx .r3 th {
-  top: 228px; /* 28 + 200 */
+  top: 200px;
   height: 24px;
   font-weight: 500;
   color: var(--color-muted);

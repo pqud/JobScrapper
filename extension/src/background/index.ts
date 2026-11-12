@@ -1,6 +1,13 @@
 import { structureWithAi, toStructuredRoles } from "../lib/ai";
 import type { FrameSnap } from "../content-scripts/detail-extract";
-import { describeGap, isEmptyExtract } from "../lib/content-root";
+import {
+  deadlineFromText,
+  describeGap,
+  isEmptyExtract,
+  metaLines,
+  placeHint,
+  sectionsNeedingVision,
+} from "../lib/content-root";
 import {
   DETAIL_EXTRACT_SCRIPT,
   DISABLE_SITE_GUARD,
@@ -71,7 +78,8 @@ function snapToRaw(snap: FrameSnap, pageUrl: string, widened: boolean): RawJob {
   const text = widened ? snap.widenedText || snap.text : snap.text;
   const images = widened ? snap.widenedImages : snap.imageUrls;
   const missing = widened ? snap.widenedMissing : snap.missing;
-  const needVision = missing.length > 0 && images.length > 0;
+  const needVision =
+    sectionsNeedingVision(missing).length > 0 && images.length > 0;
   const note = describeGap(missing, images.length, text.length);
   return {
     url: pageUrl.split("#")[0],
@@ -81,9 +89,9 @@ function snapToRaw(snap: FrameSnap, pageUrl: string, widened: boolean): RawJob {
     rawText: text,
     imageUrls: needVision ? images.slice(0, 5) : [],
     salaryHint: "",
-    locationHint: "",
-    employmentHint: "",
-    deadlineHint: "",
+    locationHint: placeHint(text),
+    employmentHint: (text.match(/정규직|계약직|파견직|인턴/) || [""])[0],
+    deadlineHint: deadlineFromText(text),
     scrapedAt: new Date().toISOString(),
     extractNote: note || undefined,
   };
@@ -98,7 +106,7 @@ async function extractFromTab(tabId: number, pageUrl: string): Promise<{
     throw new Error("프레임에 추출 스크립트를 넣지 못했습니다. 페이지를 새로고침한 뒤 다시 수집해 주세요.");
   }
   snaps.sort((a, b) => b.score - a.score);
-  const best = snaps[0];
+  const best = mergeOutsideMeta(snaps[0], snaps);
   const top = snaps.find((s) => s.isTop);
   const company = best.companyName || top?.companyName || "";
   const title = (best.isTop ? best.title : top?.title || best.title) || best.title;
@@ -115,6 +123,23 @@ async function extractFromTab(tabId: number, pageUrl: string): Promise<{
       ? snapToRaw(snap, pageUrl, true)
       : null;
   return { raw, wider };
+}
+
+function mergeOutsideMeta(best: FrameSnap, snaps: FrameSnap[]): FrameSnap {
+  const bits: string[] = [];
+  for (const s of snaps) {
+    if (s === best) continue;
+    const m = metaLines(s.text);
+    if (!m || best.text.includes(m.slice(0, Math.min(20, m.length)))) continue;
+    bits.push(m);
+  }
+  if (!bits.length) return best;
+  const prefix = bits.join("\n");
+  return {
+    ...best,
+    text: `${prefix}\n\n${best.text}`,
+    widenedText: `${prefix}\n\n${best.widenedText || best.text}`,
+  };
 }
 
 function tagsEmpty(job: StoredJob): boolean {
@@ -170,10 +195,11 @@ async function runAi(job: StoredJob): Promise<StoredJob> {
       },
       roles,
       selectedRoleIds: roles.map((r) => r.id),
-      deadline: job.deadline || job.raw.deadlineHint || null,
-      salary: job.salary || job.raw.salaryHint || null,
-      location: job.location || job.raw.locationHint || null,
-      employmentType: job.employmentType || job.raw.employmentHint || null,
+      deadline: data.deadline || job.deadline || job.raw.deadlineHint || null,
+      salary: data.salary || job.salary || job.raw.salaryHint || null,
+      location: data.location || job.location || job.raw.locationHint || null,
+      employmentType:
+        data.employmentType || job.employmentType || job.raw.employmentHint || null,
       structuredAt: new Date().toISOString(),
       structureError: null,
     };
@@ -243,12 +269,118 @@ function rawToStored(raw: RawJob): StoredJob {
   };
 }
 
+type PendingRegion = {
+  tabId: number;
+  url: string;
+  snap: FrameSnap;
+};
+
+export type PendingRegionView = {
+  tabId: number;
+  url: string;
+  title: string;
+  companyName: string;
+  preview: string;
+  textLen: number;
+  imageCount: number;
+  note: string | null;
+};
+
+const PENDING_KEY = "pendingRegion";
+
+/** SW가 storage await 전에 죽어도 같은 생애주기 안에서는 살아 있게 */
+let pendingMemory: PendingRegion | null = null;
+
+function pageKey(url: string): string {
+  return url.split("#")[0];
+}
+
+function toPendingView(p: PendingRegion): PendingRegionView {
+  const text = p.snap.text || "";
+  return {
+    tabId: p.tabId,
+    url: p.url,
+    title: p.snap.title || "",
+    companyName: p.snap.companyName || "",
+    preview: text.replace(/\s+/g, " ").trim().slice(0, 160),
+    textLen: text.length,
+    imageCount: p.snap.imageUrls.length,
+    note: p.snap.note,
+  };
+}
+
+async function setPendingRegion(p: PendingRegion | null): Promise<void> {
+  pendingMemory = p;
+  try {
+    if (p) await chrome.storage.session.set({ [PENDING_KEY]: p });
+    else await chrome.storage.session.remove(PENDING_KEY);
+  } catch {
+    // session 실패해도 memory로 같은 SW 생애 안에서는 수집 가능
+  }
+}
+
+async function getPendingRegion(): Promise<PendingRegion | null> {
+  if (pendingMemory?.snap && typeof pendingMemory.tabId === "number") {
+    return pendingMemory;
+  }
+  try {
+    const data = await chrome.storage.session.get(PENDING_KEY);
+    const p = data[PENDING_KEY] as PendingRegion | undefined;
+    if (p?.snap && typeof p.tabId === "number") {
+      pendingMemory = p;
+      return p;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+async function activeHttpTab(): Promise<chrome.tabs.Tab | undefined> {
+  const [tab] = await chrome.tabs.query({
+    active: true,
+    lastFocusedWindow: true,
+  });
+  return tab;
+}
+
+async function clearPickOnTab(tabId: number): Promise<void> {
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: "CLEAR_PICK" });
+  } catch {
+    /* tab may be gone */
+  }
+}
+
+async function collectFromSnap(
+  snap: FrameSnap,
+  pageUrl: string
+): Promise<{ ok: boolean; job?: StoredJob; error?: string }> {
+  if (isEmptyExtract(snap.text.length, snap.imageUrls.length)) {
+    return {
+      ok: false,
+      error:
+        snap.note ||
+        "선택한 영역에 글자가 거의 없고, 큰 이미지도 없습니다. 다른 영역을 선택해 주세요.",
+    };
+  }
+  const raw = snapToRaw(snap, pageUrl, false);
+  const wider =
+    snap.widenedText && snap.widenedText !== snap.text
+      ? snapToRaw(snap, pageUrl, true)
+      : null;
+  let job = rawToStored(raw);
+  job = await structureJobIfNeeded(job, wider);
+  await upsertJob(job);
+  return { ok: true, job };
+}
+
 async function collectCurrentTab(): Promise<{
   ok: boolean;
   job?: StoredJob;
   error?: string;
 }> {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = await activeHttpTab();
   if (!tab?.id || !tab.url) {
     return { ok: false, error: "활성 탭이 없습니다." };
   }
@@ -262,6 +394,10 @@ async function collectCurrentTab(): Promise<{
     };
   }
   try {
+    const pending = await getPendingRegion();
+    if (pending && pending.tabId === tab.id) {
+      return collectFromSnap(pending.snap, tab.url);
+    }
     const { raw, wider } = await extractFromTab(tab.id, tab.url);
     let job = rawToStored(raw);
     job = await structureJobIfNeeded(job, wider);
@@ -303,7 +439,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     collectLock = true;
     void (async () => {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = await activeHttpTab();
       if (!tab?.id || !tab.url || !isHttpPageUrl(tab.url)) {
         collectLock = false;
         sendResponse({ ok: false, error: "http(s) 페이지에서만 영역을 고를 수 있습니다." });
@@ -333,8 +469,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return;
         }
         const snap = message.snap as FrameSnap | undefined;
+        const tabId = _sender.tab?.id;
         const pageUrl = _sender.tab?.url || snap?.href || "";
-        if (!snap || !pageUrl || !isHttpPageUrl(pageUrl)) {
+        if (!snap || tabId == null || !pageUrl || !isHttpPageUrl(pageUrl)) {
           sendResponse({ ok: false, error: "선택한 영역의 페이지 주소를 알 수 없습니다." });
           return;
         }
@@ -347,19 +484,45 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           });
           return;
         }
-        const raw = snapToRaw(snap, pageUrl, false);
-        const wider =
-          snap.widenedText && snap.widenedText !== snap.text
-            ? snapToRaw(snap, pageUrl, true)
-            : null;
-        let job = rawToStored(raw);
-        job = await structureJobIfNeeded(job, wider);
-        await upsertJob(job);
-        sendResponse({ ok: true, job });
+        const pending: PendingRegion = {
+          tabId,
+          url: pageKey(pageUrl),
+          snap,
+        };
+        // 콘텐츠 스크립트가 응답을 기다리므로, storage까지 쓴 뒤 응답한다.
+        await setPendingRegion(pending);
+        sendResponse({ ok: true, pending: toPendingView(pending) });
       } finally {
         clearPickTimeout();
         collectLock = false;
       }
+    })();
+    return true;
+  }
+
+  if (message.type === "GET_PENDING_REGION") {
+    void (async () => {
+      const tab = await activeHttpTab();
+      const pending = await getPendingRegion();
+      if (!tab?.id || !pending || pending.tabId !== tab.id) {
+        sendResponse({ ok: true, pending: null });
+        return;
+      }
+      sendResponse({ ok: true, pending: toPendingView(pending) });
+    })();
+    return true;
+  }
+
+  if (message.type === "CLEAR_REGION") {
+    void (async () => {
+      const pending = await getPendingRegion();
+      await setPendingRegion(null);
+      if (pending) await clearPickOnTab(pending.tabId);
+      else {
+        const tab = await activeHttpTab();
+        if (tab?.id) await clearPickOnTab(tab.id);
+      }
+      sendResponse({ ok: true });
     })();
     return true;
   }

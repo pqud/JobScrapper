@@ -6,6 +6,17 @@ import type {
 } from "../lib/types";
 import { DEFAULT_SETTINGS } from "../lib/types";
 
+type PendingRegionView = {
+  tabId: number;
+  url: string;
+  title: string;
+  companyName: string;
+  preview: string;
+  textLen: number;
+  imageCount: number;
+  note: string | null;
+};
+
 export function Popup() {
   const [settings, setSettings] =
     useState<ExtensionSettings>(DEFAULT_SETTINGS);
@@ -14,6 +25,7 @@ export function Popup() {
   const [busy, setBusy] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [pending, setPending] = useState<PendingRegionView | null>(null);
 
   const refreshJobs = useCallback(() => {
     chrome.runtime.sendMessage({ type: "GET_JOBS" }, (res) => {
@@ -27,10 +39,17 @@ export function Popup() {
     });
   }, []);
 
+  const loadPending = useCallback(() => {
+    chrome.runtime.sendMessage({ type: "GET_PENDING_REGION" }, (res) => {
+      setPending(res?.pending || null);
+    });
+  }, []);
+
   useEffect(() => {
     loadSettings();
     refreshJobs();
-  }, [loadSettings, refreshJobs]);
+    loadPending();
+  }, [loadSettings, refreshJobs, loadPending]);
 
   const saveSettings = (patch: Partial<ExtensionSettings>) => {
     setSettings((prev) => ({ ...prev, ...patch }));
@@ -58,7 +77,7 @@ export function Popup() {
     // Ensure key is flushed before AI call
     if (settings.apiKey) persistKeyNow(settings.apiKey);
     setBusy(true);
-    setStatus("현재 탭 수집 중…");
+    setStatus(pending ? "선택한 영역 수집 중…" : "현재 탭 수집 중…");
     chrome.runtime.sendMessage({ type: "COLLECT_CURRENT" }, (res) => {
       setBusy(false);
       if (chrome.runtime.lastError) {
@@ -75,6 +94,7 @@ export function Popup() {
           : `저장됨 · ${res.job?.raw?.title?.slice(0, 40) || "완료"}`
       );
       refreshJobs();
+      loadPending();
     });
   };
 
@@ -90,9 +110,17 @@ export function Popup() {
       }
       setStatus(
         res?.ok
-          ? "페이지에서 본문 영역을 클릭하세요. Esc로 취소."
+          ? "페이지에서 본문 영역을 클릭하세요. Esc로 취소. 선택 후 팝업을 다시 열어 주세요."
           : res?.error || "영역 선택을 시작하지 못했습니다."
       );
+    });
+  };
+
+  const onClearRegion = () => {
+    if (busy) return;
+    chrome.runtime.sendMessage({ type: "CLEAR_REGION" }, () => {
+      setPending(null);
+      setStatus("영역 선택을 해제했습니다.");
     });
   };
 
@@ -210,15 +238,35 @@ export function Popup() {
           aria-busy={busy}
           onClick={onCollect}
         >
-          {busy ? "수집 중…" : "현재 탭 수집"}
+          {busy ? "수집 중…" : pending ? "현재 영역 수집" : "현재 탭 수집"}
         </button>
-        {status.includes("영역 선택") ||
-        status.includes("영역을 클릭") ||
-        jobs.some((j) => j.structureError?.includes("영역 선택")) ? (
+        {pending ? (
+          <div style={s.pendingBox}>
+            <div style={s.pendingHead}>선택 영역</div>
+            <div style={s.pendingMeta}>
+              {(pending.companyName || pending.title || "본문").slice(0, 48)}
+              {" · "}
+              글자 {pending.textLen}
+              {pending.imageCount ? ` · 이미지 ${pending.imageCount}` : ""}
+            </div>
+            {pending.preview ? (
+              <div style={s.pendingPreview}>{pending.preview}</div>
+            ) : null}
+            {pending.note ? <div style={s.pendingNote}>{pending.note}</div> : null}
+            <div style={s.row}>
+              <button type="button" style={s.linkBtn} disabled={busy} onClick={onPick}>
+                영역 다시 선택
+              </button>
+              <button type="button" style={s.danger} disabled={busy} onClick={onClearRegion}>
+                영역 삭제
+              </button>
+            </div>
+          </div>
+        ) : (
           <button type="button" style={s.linkBtn} disabled={busy} onClick={onPick}>
             영역 선택
           </button>
-        ) : null}
+        )}
       </section>
 
       {status ? <p style={s.status}>{status}</p> : null}
@@ -326,6 +374,9 @@ function JobDetail({ job }: { job: StoredJob }) {
       {job.roles.map((r) => (
         <div key={r.id} style={s.roleBlock}>
           <div style={{ fontWeight: 700, fontSize: 12 }}>{r.title}</div>
+          {r.exp ? (
+            <div style={{ fontSize: 11, color: "#555" }}>경력: {r.exp}</div>
+          ) : null}
           {bullets("담당업무", r.duties)}
           {bullets("자격요건", r.required)}
           {bullets("우대", r.preferred)}
@@ -436,6 +487,25 @@ const s: Record<string, React.CSSProperties> = {
     padding: "6px 8px",
     borderRadius: 6,
   },
+  pendingBox: {
+    border: "1px solid #c9d7f5",
+    background: "#f3f7ff",
+    borderRadius: 6,
+    padding: 8,
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+  },
+  pendingHead: { fontSize: 11, fontWeight: 700, color: "#2f6feb" },
+  pendingMeta: { fontSize: 11, color: "#555" },
+  pendingPreview: {
+    fontSize: 11,
+    lineHeight: 1.4,
+    color: "#333",
+    maxHeight: 64,
+    overflow: "hidden",
+  },
+  pendingNote: { fontSize: 11, color: "#8a6d00" },
   list: { listStyle: "none", margin: 0, padding: 0 },
   item: {
     borderTop: "1px solid #f0f0ec",

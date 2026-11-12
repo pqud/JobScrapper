@@ -36,6 +36,10 @@ export interface StructuredRole {
   required: string[];
   preferred: string[];
   skills: string[];
+  /** 이 직무의 근무지. 없으면 공고 공통 location. */
+  loc?: string;
+  /** 신입, 경력 n년 이상. 기술 태그와 분리. */
+  exp?: string;
 }
 
 export interface StoredJob {
