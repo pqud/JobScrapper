@@ -63,6 +63,29 @@ export async function removeJob(id: string): Promise<void> {
   await chrome.storage.local.set({ [JOBS_KEY]: jobs });
 }
 
+/** 한 공고 안의 직무(role)만 제거. 마지막이면 공고 전체 삭제. */
+export async function removeRole(
+  jobId: string,
+  roleId: string
+): Promise<StoredJob[]> {
+  const jobs = await getJobs();
+  const i = jobs.findIndex((j) => j.id === jobId);
+  if (i < 0) return jobs;
+  const job = jobs[i];
+  const roles = job.roles.filter((r) => r.id !== roleId);
+  if (!roles.length) {
+    jobs.splice(i, 1);
+  } else {
+    jobs[i] = {
+      ...job,
+      roles,
+      selectedRoleIds: job.selectedRoleIds.filter((id) => id !== roleId),
+    };
+  }
+  await chrome.storage.local.set({ [JOBS_KEY]: jobs });
+  return jobs;
+}
+
 /** Stable id from posting URL. Do not truncate btoa — shared prefixes collide. */
 export function jobIdFromUrl(url: string): string {
   try {
@@ -84,4 +107,96 @@ export function jobIdFromUrl(url: string): string {
   } catch {
     return `u-${Date.now()}`;
   }
+}
+
+export type JobsExportFile = {
+  version: number;
+  exportedAt: string;
+  jobs: StoredJob[];
+};
+
+export function serializeJobsExport(jobs: StoredJob[]): string {
+  const payload: JobsExportFile = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    jobs,
+  };
+  return JSON.stringify(payload, null, 2);
+}
+
+function isStoredJob(v: unknown): v is StoredJob {
+  if (!v || typeof v !== "object") return false;
+  const j = v as StoredJob;
+  return (
+    typeof j.id === "string" &&
+    !!j.raw &&
+    typeof j.raw.url === "string" &&
+    typeof j.raw.title === "string" &&
+    Array.isArray(j.roles)
+  );
+}
+
+/** 내보내기 JSON → StoredJob[]. {version,jobs} 또는 jobs 배열만도 허용. */
+export function parseJobsExport(raw: string): StoredJob[] {
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw new Error("JSON 파싱에 실패했습니다.");
+  }
+  const list = Array.isArray(data)
+    ? data
+    : data && typeof data === "object" && Array.isArray((data as JobsExportFile).jobs)
+      ? (data as JobsExportFile).jobs
+      : null;
+  if (!list) throw new Error("jobs 배열이 없습니다.");
+  const jobs = list.filter(isStoredJob);
+  if (!jobs.length) throw new Error("가져올 공고가 없습니다.");
+  return jobs.slice(0, 200);
+}
+
+export type ImportJobsResult = {
+  added: number;
+  updated: number;
+  total: number;
+  jobs: StoredJob[];
+};
+
+/** merge: id/url 같으면 덮어씀. replace: 파일 내용으로 교체. */
+export async function importJobs(
+  incoming: StoredJob[],
+  mode: "merge" | "replace" = "merge"
+): Promise<ImportJobsResult> {
+  if (mode === "replace") {
+    const jobs = incoming.slice(0, 200);
+    await chrome.storage.local.set({ [JOBS_KEY]: jobs });
+    return { added: jobs.length, updated: 0, total: jobs.length, jobs };
+  }
+  const cur = await getJobs();
+  let added = 0;
+  let updated = 0;
+  const next = [...cur];
+  for (const job of incoming) {
+    const i = next.findIndex((j) => j.id === job.id || j.raw.url === job.raw.url);
+    if (i >= 0) {
+      next[i] = job;
+      updated += 1;
+    } else {
+      next.unshift(job);
+      added += 1;
+    }
+  }
+  const jobs = next.slice(0, 200);
+  await chrome.storage.local.set({ [JOBS_KEY]: jobs });
+  return { added, updated, total: jobs.length, jobs };
+}
+
+export function downloadTextFile(filename: string, text: string): void {
+  const blob = new Blob([text], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }

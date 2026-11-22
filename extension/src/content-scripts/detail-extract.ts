@@ -243,10 +243,28 @@ function snapFromElement(el: HTMLElement): FrameSnap {
 }
 
 const PICK_BAR_ID = "jobscrap-pick";
+const PICK_OVERLAY_ID = "jobscrap-pick-overlay";
 const PICKED_BAR_ID = "jobscrap-picked";
 const PICKED_OUTLINE = "2px solid #2f6feb";
 
 let lockedPick: { el: HTMLElement; outline: string } | null = null;
+let stopPickMode: (() => void) | null = null;
+
+function pickLog(event: string, detail?: Record<string, unknown>) {
+  try {
+    chrome.runtime.sendMessage({
+      type: "DEBUG_LOG",
+      event,
+      detail: {
+        href: location.href.split("#")[0],
+        isTop: window.top === window,
+        ...detail,
+      },
+    });
+  } catch {
+    /* ignore */
+  }
+}
 
 function clearLockedPick() {
   if (lockedPick) {
@@ -260,7 +278,7 @@ function showPickedBar() {
   if (!lockedPick || document.getElementById(PICKED_BAR_ID)) return;
   const bar = document.createElement("div");
   bar.id = PICKED_BAR_ID;
-  bar.textContent = "영역 선택됨 · 확장 팝업에서「현재 영역 수집」";
+  bar.textContent = "영역 선택됨 · 확장 팝업에서「선택한 영역 수집하기」";
   bar.style.cssText =
     "position:fixed;z-index:2147483647;left:12px;top:12px;padding:8px 12px;background:#1a1a1a;color:#fff;font:13px/1.4 sans-serif;border-radius:8px;max-width:min(420px,90vw)";
   document.documentElement.appendChild(bar);
@@ -273,69 +291,175 @@ function lockPick(el: HTMLElement, savedOutline: string) {
   showPickedBar();
 }
 
-function startPick() {
-  if (window.top !== window || document.getElementById(PICK_BAR_ID)) return;
+/** SVG·텍스트 노드도 부모 HTMLElement로 올린다. */
+function pickElement(target: EventTarget | null): HTMLElement | null {
+  let n: Node | null = target instanceof Node ? target : null;
+  while (n) {
+    if (
+      n instanceof HTMLElement &&
+      n.id !== PICK_BAR_ID &&
+      n.id !== PICK_OVERLAY_ID &&
+      n.id !== PICKED_BAR_ID
+    ) {
+      return n;
+    }
+    n = n.parentNode;
+  }
+  return null;
+}
+
+function showPickFail(message: string) {
   document.getElementById(PICKED_BAR_ID)?.remove();
+  const fail = document.createElement("div");
+  fail.id = PICKED_BAR_ID;
+  fail.textContent = message;
+  fail.style.cssText =
+    "position:fixed;z-index:2147483647;left:12px;top:12px;padding:8px 12px;background:#7a1f1f;color:#fff;font:13px/1.4 sans-serif;border-radius:8px;max-width:min(420px,90vw)";
+  document.documentElement.appendChild(fail);
+  setTimeout(() => fail.remove(), 4000);
+}
+
+/** 오버레이 잠시 끄고 좌표 아래 실제 요소를 본다. */
+function elementFromPoint(x: number, y: number): HTMLElement | null {
+  const overlay = document.getElementById(PICK_OVERLAY_ID);
+  const bar = document.getElementById(PICK_BAR_ID);
+  if (overlay) overlay.style.pointerEvents = "none";
+  if (bar) bar.style.pointerEvents = "none";
+  const raw = document.elementFromPoint(x, y);
+  if (overlay) overlay.style.pointerEvents = "auto";
+  if (bar) bar.style.pointerEvents = "auto";
+  return pickElement(raw);
+}
+
+/**
+ * top에 큰 iframe이 있으면 top 오버레이가 iframe 클릭을 가로채므로 건너뛴다.
+ * iframe 프레임 안에서만 오버레이를 켠다.
+ */
+function shouldPickInThisFrame(): { ok: boolean; reason: string } {
+  if (window.top !== window) {
+    const body = document.body;
+    if (!body) return { ok: false, reason: "no_body" };
+    const r = body.getBoundingClientRect();
+    if (r.width < 40 || r.height < 40) return { ok: false, reason: "tiny_frame" };
+    return { ok: true, reason: "iframe" };
+  }
+  const vw = window.innerWidth || 1;
+  const vh = window.innerHeight || 1;
+  const area = vw * vh;
+  for (const f of document.querySelectorAll("iframe")) {
+    const r = f.getBoundingClientRect();
+    if (r.width * r.height >= area * 0.4) {
+      return { ok: false, reason: "large_iframe_child" };
+    }
+  }
+  return { ok: true, reason: "top" };
+}
+
+/**
+ * 페이지가 click/pointerdown을 가로채도 되게, 전체 오버레이가 입력을 받는다.
+ * @returns 오버레이를 실제로 걸었는지
+ */
+function startPick(): { started: boolean; reason: string } {
+  stopPickMode?.();
+  document.getElementById(PICKED_BAR_ID)?.remove();
+  document.getElementById(PICK_BAR_ID)?.remove();
+  document.getElementById(PICK_OVERLAY_ID)?.remove();
+
+  const gate = shouldPickInThisFrame();
+  if (!gate.ok) {
+    pickLog("pick_skip_frame", { reason: gate.reason });
+    return { started: false, reason: gate.reason };
+  }
+
   const bar = document.createElement("div");
   bar.id = PICK_BAR_ID;
   bar.textContent = "본문으로 쓸 영역을 클릭하세요. Esc로 취소";
   bar.style.cssText =
-    "position:fixed;z-index:2147483647;left:12px;top:12px;padding:8px 12px;background:#1a1a1a;color:#fff;font:13px/1.4 sans-serif;border-radius:8px";
+    "position:fixed;z-index:2147483647;left:12px;top:12px;padding:8px 12px;background:#1a1a1a;color:#fff;font:13px/1.4 sans-serif;border-radius:8px;pointer-events:none";
+
+  const overlay = document.createElement("div");
+  overlay.id = PICK_OVERLAY_ID;
+  overlay.tabIndex = 0;
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-label", "영역 선택");
+  overlay.style.cssText =
+    "position:fixed;inset:0;z-index:2147483646;cursor:crosshair;background:rgba(47,111,235,0.06);outline:none";
+
+  document.documentElement.appendChild(overlay);
   document.documentElement.appendChild(bar);
+  try {
+    overlay.focus({ preventScroll: true });
+  } catch {
+    /* ignore */
+  }
+
   let prev: { el: HTMLElement; outline: string } | null = null;
+  let done = false;
+  let moves = 0;
+
+  const restorePrev = () => {
+    if (!prev) return;
+    if (lockedPick && prev.el === lockedPick.el) {
+      prev.el.style.outline = PICKED_OUTLINE;
+    } else {
+      prev.el.style.outline = prev.outline;
+    }
+    prev = null;
+  };
+
   const cleanup = () => {
-    if (prev) {
-      if (lockedPick && prev.el === lockedPick.el) {
-        prev.el.style.outline = PICKED_OUTLINE;
-      } else {
-        prev.el.style.outline = prev.outline;
-      }
-      prev = null;
-    }
-    bar.remove();
-    document.removeEventListener("mouseover", over, true);
-    document.removeEventListener("click", click, true);
+    restorePrev();
+    overlay.removeEventListener("keydown", key, true);
+    window.removeEventListener("keydown", key, true);
     document.removeEventListener("keydown", key, true);
+    overlay.remove();
+    bar.remove();
+    stopPickMode = null;
   };
-  const over = (e: MouseEvent) => {
-    const el = e.target;
-    if (!(el instanceof HTMLElement) || el === bar || bar.contains(el)) return;
-    if (prev?.el !== el) {
-      if (prev) {
-        if (lockedPick && prev.el === lockedPick.el) {
-          prev.el.style.outline = PICKED_OUTLINE;
-        } else {
-          prev.el.style.outline = prev.outline;
-        }
+  stopPickMode = cleanup;
+
+  const highlightAt = (x: number, y: number) => {
+    const el = elementFromPoint(x, y);
+    if (!el || prev?.el === el) return;
+    restorePrev();
+    prev = { el, outline: el.style.outline };
+    el.style.outline = PICKED_OUTLINE;
+  };
+
+  const onMove = (e: PointerEvent) => {
+    moves += 1;
+    if (document.activeElement !== overlay) {
+      try {
+        overlay.focus({ preventScroll: true });
+      } catch {
+        /* ignore */
       }
-      const base =
-        lockedPick && el === lockedPick.el ? lockedPick.outline : el.style.outline;
-      prev = { el, outline: base };
-      el.style.outline = PICKED_OUTLINE;
     }
+    if (moves === 1 || moves === 10) {
+      pickLog("pick_move", { moves, x: e.clientX, y: e.clientY });
+    }
+    highlightAt(e.clientX, e.clientY);
   };
-  const click = (e: MouseEvent) => {
-    const el = e.target;
-    if (!(el instanceof HTMLElement) || el === bar || bar.contains(el)) return;
+
+  const onDown = (e: PointerEvent) => {
+    if (done || e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
-    const savedOutline =
-      lockedPick && el === lockedPick.el
-        ? lockedPick.outline
-        : prev?.el === el
-          ? prev.outline
-          : el.style.outline;
-    if (prev) {
-      if (lockedPick && prev.el === lockedPick.el) {
-        prev.el.style.outline = PICKED_OUTLINE;
-      } else {
-        prev.el.style.outline = prev.outline;
-      }
-      prev = null;
+    const el = elementFromPoint(e.clientX, e.clientY);
+    if (!el) {
+      pickLog("pick_down_miss", { x: e.clientX, y: e.clientY });
+      return;
     }
+    done = true;
+    const savedOutline = prev?.el === el ? prev.outline : el.style.outline;
     cleanup();
+    lockPick(el, savedOutline);
     const snap = snapFromElement(el);
-    // MV3: 응답을 기다려야 SW가 storage 쓰기 전에 죽지 않는다.
+    pickLog("pick_down_ok", {
+      tag: el.tagName,
+      textLen: snap.text.length,
+      score: snap.score,
+    });
     chrome.runtime.sendMessage({ type: "REGION_PICKED", snap }, (res) => {
       if (chrome.runtime.lastError || !res?.ok) {
         clearLockedPick();
@@ -343,51 +467,73 @@ function startPick() {
           chrome.runtime.lastError?.message ||
           res?.error ||
           "영역 저장에 실패했습니다.";
-        const fail = document.createElement("div");
-        fail.id = PICKED_BAR_ID;
-        fail.textContent = err;
-        fail.style.cssText =
-          "position:fixed;z-index:2147483647;left:12px;top:12px;padding:8px 12px;background:#7a1f1f;color:#fff;font:13px/1.4 sans-serif;border-radius:8px;max-width:min(420px,90vw)";
-        document.documentElement.appendChild(fail);
-        setTimeout(() => fail.remove(), 4000);
+        pickLog("pick_save_fail", { error: err });
+        showPickFail(err);
         return;
       }
-      lockPick(el, savedOutline);
+      pickLog("pick_save_ok", { textLen: snap.text.length });
     });
   };
+
   const key = (e: KeyboardEvent) => {
-    if (e.key !== "Escape") return;
+    if (e.key !== "Escape" && e.code !== "Escape") return;
+    if (done) return;
+    done = true;
+    e.preventDefault();
+    e.stopPropagation();
     cleanup();
-    showPickedBar();
-    chrome.runtime.sendMessage({ type: "REGION_PICKED", cancel: true });
+    pickLog("pick_cancel");
+    try {
+      chrome.runtime.sendMessage({ type: "REGION_PICKED", cancel: true });
+    } catch {
+      /* ignore */
+    }
   };
-  document.addEventListener("mouseover", over, true);
-  document.addEventListener("click", click, true);
+
+  overlay.addEventListener("pointermove", onMove);
+  overlay.addEventListener("pointerdown", onDown);
+  overlay.addEventListener("keydown", key, true);
+  window.addEventListener("keydown", key, true);
   document.addEventListener("keydown", key, true);
+  pickLog("pick_overlay_on", { reason: gate.reason });
+  return { started: true, reason: gate.reason };
+}
+
+function stopPickAll() {
+  stopPickMode?.();
+  clearLockedPick();
 }
 
 const g = globalThis as unknown as {
   __jobscrapExtract?: () => Promise<FrameSnap | null>;
+  __jobscrapStartPick?: () => { started: boolean; reason: string };
+  __jobscrapClearPick?: () => void;
+  __jobscrapStopPick?: () => void;
   __jobscrapBound?: boolean;
 };
 g.__jobscrapExtract = extractFrame;
+g.__jobscrapStartPick = startPick;
+g.__jobscrapClearPick = clearLockedPick;
+g.__jobscrapStopPick = stopPickAll;
 
 try {
   if (
     !g.__jobscrapBound &&
     typeof chrome !== "undefined" &&
-    chrome.runtime?.onMessage &&
-    window.top === window
+    chrome.runtime?.onMessage
   ) {
     g.__jobscrapBound = true;
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type === "START_PICK") {
-        startPick();
-        sendResponse({ ok: true });
+        const r = g.__jobscrapStartPick?.() || {
+          started: false,
+          reason: "no_fn",
+        };
+        sendResponse({ ok: true, ...r });
         return false;
       }
       if (message?.type === "CLEAR_PICK") {
-        clearLockedPick();
+        g.__jobscrapStopPick?.();
         sendResponse({ ok: true });
         return false;
       }

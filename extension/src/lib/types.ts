@@ -51,6 +51,8 @@ export interface StoredJob {
   salary: string | null;
   location: string | null;
   employmentType: string | null;
+  /** 특이 유의사항 (희망연봉 필수 등). 일반 법적 고지는 넣지 않음. */
+  notes?: string[];
   structuredAt: string | null;
   structureError: string | null;
 }

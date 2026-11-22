@@ -1,9 +1,21 @@
 ﻿import { useEffect, useMemo, useState } from "react";
-import { getJobs } from "../lib/storage";
+import {
+  downloadTextFile,
+  getJobs,
+  importJobs,
+  parseJobsExport,
+  removeRole,
+  serializeJobsExport,
+} from "../lib/storage";
 import type { AiUsageStats, StoredJob } from "../lib/types";
 import { EMPTY_USAGE_STATS } from "../lib/types";
 import { jobsToPostings } from "../lib/job-map";
 import { CATS, catColor, type CatKey } from "../lib/tech-taxonomy";
+import {
+  clearDebugLogs,
+  getDebugLogs,
+  type DebugLogEntry,
+} from "../lib/debug-log";
 import { clearUsageStats, getUsageStats } from "../lib/usage";
 import { CardsView } from "./CardsView";
 import { MatrixView } from "./MatrixView";
@@ -17,6 +29,7 @@ type Tab = "table" | "matrix" | "cards" | "misc";
 export function Dashboard() {
   const [jobs, setJobs] = useState<StoredJob[]>([]);
   const [usage, setUsage] = useState<AiUsageStats>(EMPTY_USAGE_STATS);
+  const [debugLogs, setDebugLogs] = useState<DebugLogEntry[]>([]);
   const [tab, setTab] = useState<Tab>("table");
   const [cat, setCat] = useState<"all" | CatKey>("all");
   const [q, setQ] = useState("");
@@ -30,6 +43,7 @@ export function Dashboard() {
   useEffect(() => {
     void getJobs().then(setJobs);
     void getUsageStats().then(setUsage);
+    void getDebugLogs().then(setDebugLogs);
     const onChange = (
       changes: { [key: string]: chrome.storage.StorageChange },
       area: string
@@ -37,6 +51,7 @@ export function Dashboard() {
       if (area !== "local") return;
       if (changes.jobscrap_jobs) void getJobs().then(setJobs);
       if (changes.jobscrap_ai_usage) void getUsageStats().then(setUsage);
+      if (changes.jobscrap_debug_log) void getDebugLogs().then(setDebugLogs);
     };
     chrome.storage.onChanged.addListener(onChange);
     return () => chrome.storage.onChanged.removeListener(onChange);
@@ -78,6 +93,40 @@ export function Dashboard() {
     return m;
   }, [postings]);
 
+  const onRemoveRole = (jobId: string, roleId: string) => {
+    void removeRole(jobId, roleId).then(setJobs);
+  };
+
+  const onExport = () => {
+    void getJobs().then((list) => {
+      downloadTextFile(
+        `jobscrap-${new Date().toISOString().slice(0, 10)}.json`,
+        serializeJobsExport(list)
+      );
+    });
+  };
+
+  const onImportFile = (file: File | null) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const incoming = parseJobsExport(String(reader.result || ""));
+        const replace = confirm(
+          "가져오기 방식\n확인 = 파일로 전체 교체\n취소 = 기존에 합치기(같은 URL은 덮어씀)"
+        );
+        void importJobs(incoming, replace ? "replace" : "merge").then((r) => {
+          setJobs(r.jobs);
+          alert(`가져옴 · 추가 ${r.added} · 갱신 ${r.updated} · 총 ${r.total}`);
+        });
+      } catch (e) {
+        alert(e instanceof Error ? e.message : "가져오기에 실패했습니다.");
+      }
+    };
+    reader.onerror = () => alert("파일을 읽지 못했습니다.");
+    reader.readAsText(file);
+  };
+
   const openN = postings.filter((p) => !p.exp).length;
 
   const toggleSort = (key: SortKey) => {
@@ -90,13 +139,38 @@ export function Dashboard() {
 
   return (
     <div className="mx-auto max-w-[1240px] px-5 pb-16 pt-7">
-      <h1 className="m-0 text-[28px] font-extrabold tracking-tight">
-        JobScrap 지도
-      </h1>
-      <p className="m-0 mt-1.5 max-w-[62ch] text-muted">
-        수집·구조화된 {postings.length}개 직무(마감 전 {openN}개)입니다. 진한
-        표시는 필수·사용, 연한 표시는 우대 기술입니다.
-      </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="m-0 text-[28px] font-extrabold tracking-tight">
+            JobScrap 지도
+          </h1>
+          <p className="m-0 mt-1.5 max-w-[62ch] text-muted">
+            수집·구조화된 {postings.length}개 직무(마감 전 {openN}개)입니다. 진한
+            표시는 필수·사용, 연한 표시는 우대 기술입니다.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 pt-1">
+          <button
+            type="button"
+            className="rounded-lg border border-line bg-surface px-3 py-1.5 text-[13px] font-semibold"
+            onClick={onExport}
+          >
+            내보내기
+          </button>
+          <label className="cursor-pointer rounded-lg border border-line bg-surface px-3 py-1.5 text-[13px] font-semibold">
+            가져오기
+            <input
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(e) => {
+                onImportFile(e.target.files?.[0] || null);
+                e.target.value = "";
+              }}
+            />
+          </label>
+        </div>
+      </div>
 
       <div
         className="mb-3.5 mt-6 flex gap-1 border-b border-line"
@@ -202,8 +276,12 @@ export function Dashboard() {
       {tab === "misc" ? (
         <UsageView
           usage={usage}
+          debugLogs={debugLogs}
           onClear={() => {
             void clearUsageStats().then(setUsage);
+          }}
+          onClearDebug={() => {
+            void clearDebugLogs().then(() => setDebugLogs([]));
           }}
         />
       ) : !postings.length ? (
@@ -218,6 +296,7 @@ export function Dashboard() {
           sortKey={sortKey}
           sortDir={sortDir}
           onSort={toggleSort}
+          onRemoveRole={onRemoveRole}
         />
       ) : tab === "matrix" ? (
         <MatrixView
@@ -234,6 +313,7 @@ export function Dashboard() {
           sort={cardSort}
           tech={tech}
           onTechToggle={(t) => setTech((cur) => (cur === t ? null : t))}
+          onRemoveRole={onRemoveRole}
           onReset={() => {
             setCat("all");
             setTech(null);

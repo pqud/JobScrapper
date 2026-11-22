@@ -22,6 +22,8 @@ export interface AiStructureResult {
   salary: string | null;
   location: string | null;
   employmentType: string | null;
+  /** 특이 유의사항 */
+  notes: string[];
   roles: Array<{
     title: string;
     cat: CatKey;
@@ -70,6 +72,8 @@ type CompactPayload = CompactRole & {
   /** 마감. 시간이 있으면 포함 (2026.10.30 4시) */
   dl?: string;
   loc?: string;
+  /** 특이 유의사항 (짧은 문장 배열) */
+  nt?: unknown;
 };
 
 const VOCAB = TECH_KEYWORDS.join(",");
@@ -77,35 +81,39 @@ const VOCAB = TECH_KEYWORDS.join(",");
 const SYSTEM = `Job posting → compact JSON only. No markdown, no prose, no quotes, no transcription.
 
 Schema (single role):
-{"co":"Acme","c":"fe","y":"경력 3년 이상","r":["React","TypeScript"],"p":["Next.js"],"x":[]}
+{"co":"Acme","c":"fe","y":"경력 3년 이상","r":["React","TypeScript"],"p":["Next.js","Auto CAD"],"x":[],"nt":["이력서에 희망 연봉 미기재 시 서류 제외"]}
 
 Several jobs on one page — one rs item per job, never merged:
-{"co":"Acme","rs":[{"c":"etc","t":"기계","r":[],"p":[],"x":["기계"]},{"c":"fe","t":"SW Engineering","r":[],"p":["Java","Python"],"x":[]},{"c":"be","t":"Cloud/Infra","r":["AWS","Azure"],"p":[],"x":[]}]}
+{"co":"Acme","nt":["이력서에 희망 연봉 미기재 시 서류 제외"],"rs":[{"c":"etc","t":"기계","r":[],"p":["전장조립","Auto CAD"],"x":["기계"]},{"c":"fe","t":"SW Engineering","r":[],"p":["Java","Python"],"x":[]},{"c":"be","t":"Cloud/Infra","r":["AWS","Azure"],"p":[],"x":[]}]}
 
 Keys:
 co=company name only. Not the post title.
 c=category one of fe|data|ai|be|game|etc. Non-software jobs (기계, 영업, 마케팅, 재무, 품질) → etc. Cloud/infra → be. AI/AX → ai.
-r=required VOCAB in 자격요건/지원자격/필수.
-p=VOCAB under 주요업무/담당업무/수행업무/업무내용/우대/우대사항. Not 자격요건.
+r=skills in 자격요건/지원자격/필수. Prefer VOCAB when it matches. Else a short domain keyword ≤24 chars (tool, process, domain skill). Not a sentence.
+p=skills under 주요업무/담당업무/수행업무/업무내용/우대/우대사항. Prefer VOCAB when it matches. Else a short domain keyword ≤24 chars. Not 자격요건.
 y=career only, ≤24 chars: 신입, 경력 3년 이상, 경력무관, 신입/경력. Not a skill.
-x=short extras (major) — max 4 per role, each ≤16 chars. Not the workplace, not career years.
+x=short extras (major/field label) — max 4 per role, each ≤16 chars. Not the workplace, not career years, not a skill already in r/p.
 t=that job's own title, Korean allowed, ≤40 chars.
 loc=that job's 근무지 ≤24 chars (e.g. 신사본점). One loc on the root if every job shares it.
 sal=pay from 근무조건/급여 ≤40 chars (e.g. 초임 4,641만원). emp=고용형태 ≤16 chars (e.g. 정규직).
-dl=마감 ≤32 chars. Include the clock when the post shows one: 10월 30일 4시 → 2026.10.30 4시, 오전 12시 → 2026.10.26 오전 12시. No time on the page → date only. Do not invent a time.
+dl=마감/접수마감/지원마감 only, ≤32 chars. 접수기간 A~B → B (end). NEVER 공고시작/접수시작/게시일/등록일. Clock when shown: 10월 30일 4시 → 2026.10.30 4시. No time → date only. Do not invent.
+nt=unusual applicant notices only (root-level array, max 4, each ≤80 chars). Keep actionable quirks: 희망연봉 필수, 특정 양식 미제출 시 제외, 포트폴리오 URL 필수 등. NEVER boilerplate: 허위사실 시 취소, 개인정보 동의, 일반 제출서류/전형절차 안내, 차별금지 문구. None → [].
 
-VOCAB (r/p must be exact strings from this list only; Korean entries allowed if listed):
+VOCAB (when the post names these, r/p must use these exact strings; Korean listed entries allowed):
 ${VOCAB}
 
 Rules:
 1) Output JSON object only. No explanations.
-2) Do NOT copy/transcribe posting text into the JSON.
-3) r/p: only exact VOCAB strings. Not in VOCAB → omit. Do not invent synonyms.
-4) One page, many jobs: each 담당업무 block or table row is one job. VOCAB in 주요업무/담당업무/수행업무 goes to p. VOCAB in 자격요건/지원자격 goes to r. Do not put 주요업무 skills in r. C언어 → C.
+2) Do NOT copy/transcribe posting paragraphs into the JSON.
+3) r/p: VOCAB hit → exact VOCAB string. No VOCAB hit but a clear single skill/tool/domain phrase (e.g. Auto CAD, 전장조립, 케이블/커넥터) → keep that short keyword. Never invent tools not in the post. No soft fluff (성실, 소통, 책임감).
+4) One page, many jobs: each 담당업무 block or table row is one job. Skills in 주요업무/담당업무/수행업무/우대 → p. Skills in 자격요건/지원자격 → r. C언어 → C.
 5) Do not copy another job's skills. A finance row with no tech stays empty. The IT row keeps its own stack.
 6) Always include co, sal, emp, loc, and dl when the poster shows them.
-7) 고용조건/근무조건/복지/인턴/4대보험/정규직 전환 is employment, not 자격요건. Put the form in emp only. If 자격요건 has no VOCAB skill, r is []. Never copy those bullets into r, p, or x.
-8) 신입/경력/n년 이상/경력무관 goes to y only, even when it sits inside 자격요건. Never put it in r, p, or x.`;
+7) 고용조건/근무조건/복지/인턴/4대보험/정규직 전환 is employment, not 자격요건. Put the form in emp only. Never copy those bullets into r, p, or x.
+8) 신입/경력/n년 이상/경력무관 goes to y only, even when it sits inside 자격요건. Never put it in r, p, or x.
+9) Max 12 tags in r and 12 in p per role. Prefer concrete tools/domain skills that show what the job is.
+10) dl is the closing deadline only. Date range → last day. Posting/open/start date alone → omit dl (do not copy it).
+11) nt only for unusual compliance risks that change how you apply. Skip routine legal/HR boilerplate.`;
 
 const MAX_OUT_TOKENS = 2048;
 const MAX_VISION_IMAGES = 3;
@@ -162,7 +170,7 @@ function buildUserPayload(raw: RawJob, attachImages: boolean): string {
     companyName: raw.companyName,
     text: raw.rawText.slice(0, 10000),
     instruction: attachImages
-      ? "Read the image table. Each job block has its own 자격요건 cell. Extract VOCAB skills, y, sal, emp, loc. Do not paste paragraphs."
+      ? "Read the image table. Each job block has its own 자격요건/우대 cell. Extract VOCAB or short domain keywords, y, sal, emp, loc. Do not paste paragraphs."
       : undefined,
   });
 }
@@ -176,14 +184,30 @@ function canonTech(raw: string): string | null {
   return null;
 }
 
+/** VOCAB이면 정규화, 아니면 짧은 도메인 키워드 그대로. */
+function skillTag(raw: string): string | null {
+  const s = String(raw || "")
+    .trim()
+    .replace(/\s+/g, " ");
+  if (!s || s.length > 24) return null;
+  const canon = canonTech(s);
+  if (canon) return canon;
+  if (isCareerBlob(s)) return null;
+  if (/정규직|계약직|4대보험|연봉|급여|복지|마감|면접|성실|소통|책임감/.test(s))
+    return null;
+  return s;
+}
+
 function techArr(v: unknown, max = 20): string[] {
   if (!Array.isArray(v)) return [];
   const out: string[] = [];
   const seen = new Set<string>();
   for (const item of v) {
-    const c = canonTech(String(item || ""));
-    if (!c || seen.has(c)) continue;
-    seen.add(c);
+    const c = skillTag(String(item || ""));
+    if (!c) continue;
+    const k = c.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
     out.push(c);
     if (out.length >= max) break;
   }
@@ -196,6 +220,33 @@ function extraArr(v: unknown, max = 6): string[] {
     .map((x) => String(x || "").trim())
     .filter((s) => s && s.length <= 16)
     .slice(0, max);
+}
+
+/** 특이 유의사항. 일반 법적 고지 문장은 버린다. */
+function noticeArr(v: unknown, max = 4): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of v) {
+    const s = String(item || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 80);
+    if (!s || s.length < 6) continue;
+    if (
+      /허위\s*사실|개인정보|차별\s*금지|남녀고용|제출\s*서류|전형\s*절차|문의|연락처|회사\s*사정/.test(
+        s
+      )
+    ) {
+      continue;
+    }
+    const k = s.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(s);
+    if (out.length >= max) break;
+  }
+  return out;
 }
 
 function parseCat(c: unknown): CatKey {
@@ -402,6 +453,27 @@ function clip(v: unknown, max: number): string {
     .slice(0, max);
 }
 
+/** AI가 기간 시작일을 dl에 넣은 경우 버린다. 끝날짜는 deadlineFromText가 이미 처리. */
+function sanitizeAiDeadline(text: string, aiDl: string): string {
+  if (!aiDl) return "";
+  const s = (text || "").replace(/\s+/g, " ");
+  const m = aiDl.match(/(\d{4})\.(\d{2})\.(\d{2})/);
+  if (!m) return aiDl;
+  // 원문에 "start ~ …" 형태면 시작일 거부
+  const re = new RegExp(
+    `${m[1]}\\s*[.\\-/년]\\s*${+m[2]}\\s*[.\\-/월]\\s*${+m[3]}\\s*일?\\s*[~\\-–—]`
+  );
+  if (re.test(s)) return "";
+  if (
+    new RegExp(
+      `(?:시작|게시|등록일|공고일)[^0-9]{0,12}${m[1]}[.\\-/]${m[2]}[.\\-/]${m[3]}`
+    ).test(s)
+  ) {
+    return "";
+  }
+  return aiDl;
+}
+
 function normalizeResult(
   payload: CompactPayload,
   raw: RawJob
@@ -413,8 +485,12 @@ function normalizeResult(
   return {
     companyName: pickCompany(payload.co, raw),
     title: raw.title,
+    // 원문 기간/마감 파싱을 AI dl보다 우선 (시작일을 마감으로 쓰는 실수 방지)
     deadline:
-      deadlineFromText(raw.rawText) || clip(payload.dl, 40) || raw.deadlineHint || null,
+      deadlineFromText(raw.rawText) ||
+      sanitizeAiDeadline(raw.rawText, clip(payload.dl, 40)) ||
+      raw.deadlineHint ||
+      null,
     salary: clip(payload.sal, 60) || raw.salaryHint || null,
     location:
       clip(payload.loc, 40) ||
@@ -422,6 +498,7 @@ function normalizeResult(
       raw.locationHint ||
       null,
     employmentType: clip(payload.emp, 24) || raw.employmentHint || null,
+    notes: noticeArr(payload.nt),
     roles,
   };
 }
@@ -560,7 +637,7 @@ function textCoversCoreSections(raw: RawJob): boolean {
 
 function userInstruction(raw: RawJob): string {
   const must =
-    'Return ONE complete JSON object and stop. If several jobs are listed, use rs with one item each. Read each 자격요건 cell. Career years go to y, not r/p/x. Example: {"co":"Acme","sal":"초임 4,641만원","emp":"정규직","dl":"2026.10.30 4시","rs":[{"c":"etc","t":"금융일반","y":"신입","r":[],"p":[],"loc":"신사본점"},{"c":"be","t":"IT전산","y":"경력 3년 이상","r":[],"p":["C","Java","Spring","SQL","Oracle","MySQL"],"loc":"신사본점"}]}. Max 12 VOCAB tags per role. Close all brackets.';
+    'Return ONE complete JSON object and stop. If several jobs are listed, use rs with one item each. Read each 자격요건/우대 cell. Career years go to y, not r/p/x. VOCAB when listed; else short domain keywords (e.g. Auto CAD, 전장조립). dl=마감 only (range end; never 시작/게시일). nt=unusual notices only (e.g. 희망연봉 미기재 시 서류 제외), not legal boilerplate. Example: {"co":"Acme","sal":"초임 4,641만원","emp":"정규직","dl":"2026.11.25","nt":["이력서에 희망 연봉 미기재 시 서류 제외"],"rs":[{"c":"etc","t":"전장조립","y":"경력무관","r":[],"p":["전장조립","Auto CAD"],"loc":"아산"},{"c":"be","t":"IT전산","y":"경력 3년 이상","r":[],"p":["C","Java","Spring","SQL"],"loc":"신사본점"}]}. Max 12 tags in r and in p per role. Close all brackets.';
   const attachImages = raw.imageUrls.length > 0 && !textCoversCoreSections(raw);
   return `${must}\n${buildUserPayload(raw, attachImages)}`;
 }
@@ -628,6 +705,21 @@ async function callOpenAI(
   };
 }
 
+/**
+ * Claude 5.x는 adaptive thinking이 기본이라 max_tokens를 사고에 다 쓰면 text가 비다.
+ * JSON 구조화에는 사고가 필요 없으니 끈다.
+ * Sonnet/Opus 5.5는 disabled가 400이라 between_tools 사용.
+ */
+function anthropicThinkingOff(
+  model: string
+): Record<string, string> | undefined {
+  const m = model.toLowerCase();
+  if (/claude-(haiku|sonnet|opus)-4|claude-3/.test(m)) return undefined;
+  if (/sonnet-5|opus-5|fable/.test(m)) return { type: "between_tools" };
+  if (/haiku-5/.test(m)) return { type: "disabled" };
+  return { type: "disabled" };
+}
+
 async function callAnthropic(
   settings: ExtensionSettings,
   raw: RawJob
@@ -658,20 +750,41 @@ async function callAnthropic(
     );
   }
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": settings.apiKey,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+  const thinking = anthropicThinkingOff(model);
+  const headers = {
+    "x-api-key": settings.apiKey,
+    "anthropic-version": "2023-06-01",
+    "Content-Type": "application/json",
+  };
+  const makeBody = (think: Record<string, string> | undefined) => {
+    const body: Record<string, unknown> = {
       model,
       max_tokens: MAX_OUT_TOKENS,
       system: SYSTEM,
       messages: [{ role: "user", content }],
-    }),
+    };
+    if (think) body.thinking = think;
+    return body;
+  };
+
+  let res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(makeBody(thinking)),
   });
+  // disabled 거절 시 between_tools로 한 번 더
+  if (!res.ok && res.status === 400 && thinking?.type === "disabled") {
+    const errOnce = await res.text();
+    if (/thinking/i.test(errOnce)) {
+      res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(makeBody({ type: "between_tools" })),
+      });
+    } else {
+      throw new Error(`Anthropic 400: ${errOnce.slice(0, 200)}`);
+    }
+  }
   if (!res.ok) {
     const err = await res.text();
     if (/CORS|browser/i.test(err)) {
@@ -687,11 +800,18 @@ async function callAnthropic(
     throw new Error(`Anthropic ${res.status}: ${err.slice(0, 200)}`);
   }
   const json = await res.json();
-  const text =
-    (json.content || [])
-      .filter((b: { type: string }) => b.type === "text")
-      .map((b: { text: string }) => b.text)
-      .join("\n") || "";
+  const blocks = (json.content || []) as Array<{ type: string; text?: string }>;
+  const text = blocks
+    .filter((b) => b.type === "text")
+    .map((b) => b.text || "")
+    .join("\n");
+  if (!text.trim()) {
+    const kinds = blocks.map((b) => b.type).join(",") || "none";
+    const stop = String(json.stop_reason || "?");
+    throw new Error(
+      `AI 응답이 비어 있습니다. stop=${stop} blocks=[${kinds}]. Claude 5 thinking이 max_tokens를 썼을 수 있습니다.`
+    );
+  }
   const u = json.usage || {};
   return {
     data: normalizeResult(parseCompactJson(text), raw),

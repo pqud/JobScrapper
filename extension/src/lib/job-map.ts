@@ -25,6 +25,8 @@ export type Posting = {
   duty: string;
   reqL: string[];
   prefL: string[];
+  /** 특이 유의사항 */
+  notes: string[];
   /** skill → 2 req, 1 pref */
   m: Map<string, 1 | 2>;
   url: string;
@@ -67,10 +69,19 @@ function parseDeadline(s: string | null | undefined): {
 }
 
 /**
- * AI compact 스키마는 이미 영문 표준 기술명.
- * 구버전 자유문 required/skills만 extractKeywords로 정규화.
- * duties(x)는 비기술 태그 → 매트릭스에 넣지 않음.
+ * VOCAB 기술명은 정규화. VOCAB 밖 짧은 도메인 키워드(예: Auto CAD, 전장조립)는 그대로.
+ * duties(x)는 매트릭스에 넣지 않음.
  */
+function skillTags(raw: string): string[] {
+  const s = String(raw || "").trim().replace(/\s+/g, " ");
+  if (!s || s.length > 24) return [];
+  if (isTechKeyword(s)) return [canonTag(s)];
+  const fromVocab = extractKeywords(s);
+  if (fromVocab.length) return fromVocab;
+  if (/정규직|계약직|4대보험|연봉|급여|복지|마감|면접/.test(s)) return [];
+  return [s];
+}
+
 function collectSkills(
   required: string[],
   preferred: string[],
@@ -79,10 +90,7 @@ function collectSkills(
   const m = new Map<string, 1 | 2>();
   const add = (list: string[], level: 1 | 2) => {
     for (const raw of list) {
-      const s = String(raw || "").trim();
-      if (!s) continue;
-      const tags = isTechKeyword(s) ? [canonTag(s)] : extractKeywords(s);
-      for (const kw of tags) {
+      for (const kw of skillTags(raw)) {
         const prev = m.get(kw) || 0;
         if (level > prev) m.set(kw, level);
       }
@@ -143,6 +151,7 @@ export function jobsToPostings(jobs: StoredJob[]): Posting[] {
         duty: role.duties.slice(0, 3).join(" · "),
         reqL,
         prefL,
+        notes: job.notes || [],
         m,
         url: job.raw.url,
         d,

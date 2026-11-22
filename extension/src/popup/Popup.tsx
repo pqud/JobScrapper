@@ -41,6 +41,10 @@ export function Popup() {
 
   const loadPending = useCallback(() => {
     chrome.runtime.sendMessage({ type: "GET_PENDING_REGION" }, (res) => {
+      if (chrome.runtime.lastError) {
+        setPending(null);
+        return;
+      }
       setPending(res?.pending || null);
     });
   }, []);
@@ -49,6 +53,14 @@ export function Popup() {
     loadSettings();
     refreshJobs();
     loadPending();
+    const onStorage = (
+      changes: { [key: string]: chrome.storage.StorageChange },
+      area: string
+    ) => {
+      if (area === "local" && changes.pendingRegion) loadPending();
+    };
+    chrome.storage.onChanged.addListener(onStorage);
+    return () => chrome.storage.onChanged.removeListener(onStorage);
   }, [loadSettings, refreshJobs, loadPending]);
 
   const saveSettings = (patch: Partial<ExtensionSettings>) => {
@@ -74,8 +86,13 @@ export function Popup() {
 
   const onCollect = () => {
     if (busy) return;
+    if (!settings.apiKey?.trim()) {
+      setStatus("API 키를 먼저 입력해 주세요.");
+      setShowKey(true);
+      return;
+    }
     // Ensure key is flushed before AI call
-    if (settings.apiKey) persistKeyNow(settings.apiKey);
+    persistKeyNow(settings.apiKey);
     setBusy(true);
     setStatus(pending ? "선택한 영역 수집 중…" : "현재 탭 수집 중…");
     chrome.runtime.sendMessage({ type: "COLLECT_CURRENT" }, (res) => {
@@ -100,18 +117,32 @@ export function Popup() {
 
   const onPick = () => {
     if (busy) return;
-    setBusy(true);
     setStatus("영역 선택 준비 중…");
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      setStatus(
+        "영역 선택 응답이 없습니다. 페이지를 새로고침한 뒤 다시 시도해 주세요."
+      );
+    }, 8000);
     chrome.runtime.sendMessage({ type: "PICK_REGION" }, (res) => {
-      setBusy(false);
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
       if (chrome.runtime.lastError) {
         setStatus(chrome.runtime.lastError.message || "영역 선택을 시작하지 못했습니다.");
         return;
       }
+      if (!res?.ok) {
+        setStatus(res?.error || "영역 선택을 시작하지 못했습니다.");
+        return;
+      }
+      const n = Number(res.startedCount) || 0;
       setStatus(
-        res?.ok
-          ? "페이지에서 본문 영역을 클릭하세요. Esc로 취소. 선택 후 팝업을 다시 열어 주세요."
-          : res?.error || "영역 선택을 시작하지 못했습니다."
+        n > 1
+          ? `선택 모드 ON (${n}개 프레임). Esc로 취소 · 연한 파란 오버레이에서 클릭`
+          : "선택 모드 ON. Esc로 취소 · 연한 파란 오버레이에서 클릭"
       );
     });
   };
@@ -136,6 +167,36 @@ export function Popup() {
       URL.revokeObjectURL(url);
       setStatus("JSON 내보냄");
     });
+  };
+
+  const onImportFile = (file: File | null) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const json = String(reader.result || "");
+      const replace = confirm(
+        "가져오기 방식\n확인 = 파일로 전체 교체\n취소 = 기존에 합치기(같은 URL은 덮어씀)"
+      );
+      chrome.runtime.sendMessage(
+        { type: "IMPORT_JSON", json, mode: replace ? "replace" : "merge" },
+        (res) => {
+          if (chrome.runtime.lastError) {
+            setStatus(chrome.runtime.lastError.message || "가져오기 실패");
+            return;
+          }
+          if (!res?.ok) {
+            setStatus(res?.error || "가져오기 실패");
+            return;
+          }
+          setStatus(
+            `가져옴 · 추가 ${res.added} · 갱신 ${res.updated} · 총 ${res.total}`
+          );
+          refreshJobs();
+        }
+      );
+    };
+    reader.onerror = () => setStatus("파일을 읽지 못했습니다.");
+    reader.readAsText(file);
   };
 
   const onRemove = (id: string) => {
@@ -232,17 +293,24 @@ export function Popup() {
           type="button"
           style={{
             ...s.primary,
-            ...(busy ? s.btnDisabled : null),
+            ...(busy || !settings.apiKey?.trim() ? s.btnDisabled : null),
           }}
-          disabled={busy}
+          disabled={busy || !settings.apiKey?.trim()}
           aria-busy={busy}
           onClick={onCollect}
         >
-          {busy ? "수집 중…" : pending ? "현재 영역 수집" : "현재 탭 수집"}
+          {busy
+            ? "수집 중…"
+            : pending
+              ? "선택한 영역 수집하기"
+              : "현재 탭 수집"}
         </button>
+        {!settings.apiKey?.trim() ? (
+          <span style={s.muted}>수집하려면 API 키가 필요합니다.</span>
+        ) : null}
         {pending ? (
           <div style={s.pendingBox}>
-            <div style={s.pendingHead}>선택 영역</div>
+            <div style={s.pendingHead}>영역이 선택되어 있습니다</div>
             <div style={s.pendingMeta}>
               {(pending.companyName || pending.title || "본문").slice(0, 48)}
               {" · "}
@@ -274,9 +342,23 @@ export function Popup() {
       <section style={s.card}>
         <div style={s.rowBetween}>
           <strong style={{ fontSize: 13 }}>저장됨 {jobs.length}</strong>
-          <button type="button" style={s.linkBtn} onClick={onExport}>
-            JSON 내보내기
-          </button>
+          <div style={s.row}>
+            <button type="button" style={s.linkBtn} onClick={onExport}>
+              내보내기
+            </button>
+            <label style={{ ...s.linkBtn, cursor: "pointer" }}>
+              가져오기
+              <input
+                type="file"
+                accept="application/json,.json"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  onImportFile(e.target.files?.[0] || null);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+          </div>
         </div>
         <ul style={s.list}>
           {jobs.slice(0, 30).map((job) => {
@@ -371,6 +453,7 @@ function JobDetail({ job }: { job: StoredJob }) {
       {job.structureError ? (
         <div style={{ ...s.status, margin: "4px 0" }}>{job.structureError}</div>
       ) : null}
+      {job.notes?.length ? bullets("유의사항", job.notes) : null}
       {job.roles.map((r) => (
         <div key={r.id} style={s.roleBlock}>
           <div style={{ fontWeight: 700, fontSize: 12 }}>{r.title}</div>

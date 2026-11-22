@@ -118,29 +118,61 @@ function withClock(base: string, tail: string): string {
   return `${base} ${ap}${m[2]}시${min}`.replace(/\s+/g, " ").trim();
 }
 
-/** '10월 26일 … 마감' 또는 D-5. 연도가 없으면 수집일 기준. */
+/** 시작/게시일이면 마감이 아님. 기간·마감·까지면 마감 후보. */
+function deadlineContextOk(s: string, i: number, len: number): boolean {
+  const ctx = s.slice(Math.max(0, i - 20), i + len + 28);
+  if (/시작|게시|등록일|공고일|모집일/.test(ctx) && !/마감|까지/.test(ctx)) {
+    return false;
+  }
+  return /마감|까지|(?:접수|모집|지원)\s*기간/.test(ctx);
+}
+
+/**
+ * 마감일만. 기간 A~B면 끝날짜.
+ * '10월 26일 … 마감' 또는 D-5. 연도가 없으면 수집일 기준.
+ */
 export function deadlineFromText(text: string, now = new Date()): string {
   const s = text.replace(/\s+/g, " ");
   const today = new Date(now);
   today.setHours(0, 0, 0, 0);
-  const nearClose = (i: number, len: number) =>
-    /마감/.test(s.slice(Math.max(0, i - 12), i + len + 20));
+
+  // 2026.11.18 ~ 2026.11.25 / 2026.11.18~11.25 → 끝날짜
+  const rangeYmd =
+    /(\d{4})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})\s*일?\s*[~\-–—至到]\s*(?:(\d{4})\s*[.\-/년]\s*)?(\d{1,2})\s*[.\-/월]\s*(\d{1,2})\s*일?/g;
+  for (const m of s.matchAll(rangeYmd)) {
+    const i = m.index || 0;
+    if (!deadlineContextOk(s, i, m[0].length)) continue;
+    const y2 = +(m[4] || m[1]);
+    const mo2 = +m[5];
+    const d2 = +m[6];
+    if (mo2 < 1 || mo2 > 12 || d2 < 1 || d2 > 31) continue;
+    return withClock(ymd(y2, mo2, d2), s.slice(i + m[0].length));
+  }
 
   for (const m of s.matchAll(/(\d{4})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})\s*일?/g)) {
     const mo = +m[2];
     const d = +m[3];
-    if (!nearClose(m.index || 0, m[0].length) || mo < 1 || mo > 12 || d < 1 || d > 31) continue;
-    return withClock(ymd(+m[1], mo, d), s.slice((m.index || 0) + m[0].length));
+    const i = m.index || 0;
+    if (!deadlineContextOk(s, i, m[0].length) || mo < 1 || mo > 12 || d < 1 || d > 31) {
+      continue;
+    }
+    // 바로 뒤에 ~ 다른 날짜가 있으면 시작일이므로 스킵 (위에서 범위로 처리)
+    if (/^\s*[~\-–—]/.test(s.slice(i + m[0].length))) continue;
+    return withClock(ymd(+m[1], mo, d), s.slice(i + m[0].length));
   }
   for (const m of s.matchAll(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/g)) {
     const mo = +m[1];
     const d = +m[2];
-    if (!nearClose(m.index || 0, m[0].length) || mo < 1 || mo > 12 || d < 1 || d > 31) continue;
+    const i = m.index || 0;
+    if (!deadlineContextOk(s, i, m[0].length) || mo < 1 || mo > 12 || d < 1 || d > 31) {
+      continue;
+    }
+    if (/^\s*[~\-–—]/.test(s.slice(i + m[0].length))) continue;
     let y = today.getFullYear();
     const dt = new Date(y, mo - 1, d);
     dt.setHours(0, 0, 0, 0);
     if (dt.getTime() < today.getTime() - 14 * 864e5) y += 1;
-    return withClock(ymd(y, mo, d), s.slice((m.index || 0) + m[0].length));
+    return withClock(ymd(y, mo, d), s.slice(i + m[0].length));
   }
   const rel = s.match(/D\s*-\s*(\d{1,3})(?!\d)/i);
   if (rel) {
@@ -291,5 +323,19 @@ export function selfCheck(): void {
     deadlineFromText("IT신입정규직교원명동빌딩10월 26일 오전 12시 마감", new Date(2026, 9, 21)) ===
       "2026.10.26 오전 12시",
     "smashed header deadline"
+  );
+  assert(
+    deadlineFromText("접수기간 2026.11.18 ~ 2026.11.25", new Date(2026, 10, 20)) ===
+      "2026.11.25",
+    "range end"
+  );
+  assert(
+    deadlineFromText("공고 시작일 2026.11.18", new Date(2026, 10, 20)) === "",
+    "start ignored"
+  );
+  assert(
+    deadlineFromText("접수기간: 2026.11.18~11.30 마감", new Date(2026, 10, 20)) ===
+      "2026.11.30",
+    "range short end"
   );
 }

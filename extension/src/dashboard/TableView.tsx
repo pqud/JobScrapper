@@ -10,11 +10,13 @@ export function TableView({
   sortKey,
   sortDir,
   onSort,
+  onRemoveRole,
 }: {
   rows: Posting[];
   sortKey: SortKey;
   sortDir: SortDir;
   onSort: (k: SortKey) => void;
+  onRemoveRole: (jobId: string, roleId: string) => void;
 }) {
   const sorted = useMemo(() => {
     const dir = sortDir === "asc" ? 1 : -1;
@@ -48,6 +50,8 @@ export function TableView({
     { key: "role", label: "직무 이름" },
   ];
 
+  const roleIdOf = (p: Posting) => p.id.slice(p.jobId.length + 2);
+
   return (
     <div className="overflow-auto rounded-[10px] border border-line bg-surface">
       <table className="w-full border-collapse text-[13px]">
@@ -63,6 +67,9 @@ export function TableView({
                 <span className="ml-1 font-medium text-muted">{mark(c.key)}</span>
               </th>
             ))}
+            <th className="sticky top-0 z-[1] whitespace-nowrap bg-surface px-3 py-2.5 text-left font-bold">
+              삭제
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -96,14 +103,40 @@ export function TableView({
                   {p.career || <span className="text-muted">—</span>}
                 </td>
                 <td className="border-b border-line px-3 py-2.5 align-top">
-                  {p.role || <span className="text-muted">—</span>}
+                  <div>{p.role || <span className="text-muted">—</span>}</div>
+                  {p.notes.length ? (
+                    <div
+                      className="mt-1 text-[11px] leading-snug text-[#8a6d00]"
+                      title={p.notes.join("\n")}
+                    >
+                      유의 · {p.notes[0]}
+                      {p.notes.length > 1 ? ` 외 ${p.notes.length - 1}` : ""}
+                    </div>
+                  ) : null}
+                </td>
+                <td className="border-b border-line px-3 py-2.5 align-top">
+                  <button
+                    type="button"
+                    className="border-0 bg-transparent p-0 text-[12px] text-[#c44] cursor-pointer"
+                    onClick={() => {
+                      if (
+                        confirm(
+                          `${p.co} · ${p.role || "직무"} 를 지도에서 삭제할까요?`
+                        )
+                      ) {
+                        onRemoveRole(p.jobId, roleIdOf(p));
+                      }
+                    }}
+                  >
+                    삭제
+                  </button>
                 </td>
               </tr>
             );
           })}
           {!sorted.length ? (
             <tr>
-              <td colSpan={6} className="px-3 py-6 text-center text-muted">
+              <td colSpan={7} className="px-3 py-6 text-center text-muted">
                 조건에 맞는 공고가 없습니다.
               </td>
             </tr>

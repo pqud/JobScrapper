@@ -9,6 +9,7 @@ export function CardsView({
   tech,
   onTechToggle,
   onReset,
+  onRemoveRole,
 }: {
   rows: Posting[];
   presentCats: typeof CATS;
@@ -16,6 +17,7 @@ export function CardsView({
   tech: string | null;
   onTechToggle: (t: string) => void;
   onReset: () => void;
+  onRemoveRole: (jobId: string, roleId: string) => void;
 }) {
   if (!rows.length) {
     return (
@@ -83,6 +85,16 @@ export function CardsView({
             {p.duty ? (
               <p className="m-0 text-[13px] text-muted">{p.duty}</p>
             ) : null}
+            {p.notes.length ? (
+              <div className="rounded-md border border-[#e8d9a8] bg-[#fff8e6] px-2.5 py-2">
+                <div className="text-[11px] font-bold text-[#8a6d00]">유의사항</div>
+                <ul className="m-0 mt-1 list-disc pl-4 text-[12.5px] leading-snug text-[#5c4a10]">
+                  {p.notes.map((n) => (
+                    <li key={n}>{n}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
             {p.reqL.length ? (
               <TechRow
                 label="필수·사용"
@@ -108,14 +120,31 @@ export function CardsView({
                 기술 키워드가 명시되지 않은 공고예요.
               </p>
             ) : null}
-            <a
-              href={p.url}
-              target="_blank"
-              rel="noreferrer"
-              className="text-[13px] text-inherit"
-            >
-              공고 링크 열기
-            </a>
+            <div className="mt-auto flex items-center justify-between gap-2">
+              <a
+                href={p.url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-[13px] text-inherit"
+              >
+                공고 링크 열기
+              </a>
+              <button
+                type="button"
+                className="border-0 bg-transparent p-0 text-[12px] text-[#c44] cursor-pointer"
+                onClick={() => {
+                  if (
+                    confirm(
+                      `${p.co} · ${p.role || "직무"} 를 지도에서 삭제할까요?`
+                    )
+                  ) {
+                    onRemoveRole(p.jobId, p.id.slice(p.jobId.length + 2));
+                  }
+                }}
+              >
+                이 직무 삭제
+              </button>
+            </div>
           </article>
         );
       })}

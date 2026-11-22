@@ -18,57 +18,80 @@ import {
 import {
   getJobs,
   getSettings,
+  importJobs,
   jobIdFromUrl,
+  parseJobsExport,
   removeJob,
   saveSettings,
+  serializeJobsExport,
   updateJob,
   upsertJob,
 } from "../lib/storage";
 import type { ExtensionSettings, RawJob, StoredJob } from "../lib/types";
+import { pushDebugLog } from "../lib/debug-log";
 import { recordUsage } from "../lib/usage";
 
+/** Maps/광고 iframe이 안 끝나면 allFrames executeScript가 무한 대기할 수 있다. */
+function withTimeout<T>(
+  p: Promise<T>,
+  ms: number
+): Promise<{ ok: true; value: T } | { ok: false }> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve({ ok: false }), ms);
+    p.then(
+      (value) => {
+        clearTimeout(t);
+        resolve({ ok: true, value });
+      },
+      () => {
+        clearTimeout(t);
+        resolve({ ok: false });
+      }
+    );
+  });
+}
+
 async function injectExtract(tabId: number): Promise<void> {
-  try {
-    await chrome.scripting.executeScript({
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: [DETAIL_EXTRACT_SCRIPT],
+  });
+  const all = withTimeout(
+    chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
       files: [DETAIL_EXTRACT_SCRIPT],
-    });
-  } catch {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: [DETAIL_EXTRACT_SCRIPT],
-    });
+    }),
+    2500
+  );
+  const r = await all;
+  if (!r.ok) {
+    await pushDebugLog("inject_all_frames_timeout", { tabId });
   }
 }
 
 async function snapsFromTab(tabId: number): Promise<FrameSnap[]> {
   await injectExtract(tabId);
-  let ran: chrome.scripting.InjectionResult[];
-  try {
-    ran = await chrome.scripting.executeScript({
+  const extractFn = () => {
+    const fn = (
+      globalThis as unknown as {
+        __jobscrapExtract?: () => Promise<unknown>;
+      }
+    ).__jobscrapExtract;
+    return fn ? fn() : null;
+  };
+  const top = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: extractFn,
+  });
+  const all = await withTimeout(
+    chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
-      func: () => {
-        const fn = (
-          globalThis as unknown as {
-            __jobscrapExtract?: () => Promise<unknown>;
-          }
-        ).__jobscrapExtract;
-        return fn ? fn() : null;
-      },
-    });
-  } catch {
-    ran = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => {
-        const fn = (
-          globalThis as unknown as {
-            __jobscrapExtract?: () => Promise<unknown>;
-          }
-        ).__jobscrapExtract;
-        return fn ? fn() : null;
-      },
-    });
-  }
+      func: extractFn,
+    }),
+    2500
+  );
+  const ran = all.ok ? all.value : top;
+  if (!all.ok) await pushDebugLog("extract_all_frames_timeout", { tabId });
   return ran
     .map((r) => r.result as FrameSnap | null)
     .filter((s): s is FrameSnap => !!s && typeof s.score === "number");
@@ -200,6 +223,7 @@ async function runAi(job: StoredJob): Promise<StoredJob> {
       location: data.location || job.location || job.raw.locationHint || null,
       employmentType:
         data.employmentType || job.employmentType || job.raw.employmentHint || null,
+      notes: data.notes?.length ? data.notes : job.notes || [],
       structuredAt: new Date().toISOString(),
       structureError: null,
     };
@@ -288,7 +312,7 @@ export type PendingRegionView = {
 
 const PENDING_KEY = "pendingRegion";
 
-/** SW가 storage await 전에 죽어도 같은 생애주기 안에서는 살아 있게 */
+/** SW 재시작 대비. local이 session보다 안정적. */
 let pendingMemory: PendingRegion | null = null;
 
 function pageKey(url: string): string {
@@ -309,14 +333,31 @@ function toPendingView(p: PendingRegion): PendingRegionView {
   };
 }
 
+async function setBadge(tabId: number | undefined, on: boolean): Promise<void> {
+  if (tabId == null) return;
+  try {
+    if (on) {
+      await chrome.action.setBadgeText({ tabId, text: "선택" });
+      await chrome.action.setBadgeBackgroundColor({ tabId, color: "#2f6feb" });
+    } else {
+      await chrome.action.setBadgeText({ tabId, text: "" });
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 async function setPendingRegion(p: PendingRegion | null): Promise<void> {
+  const prevTab = pendingMemory?.tabId;
   pendingMemory = p;
   try {
-    if (p) await chrome.storage.session.set({ [PENDING_KEY]: p });
-    else await chrome.storage.session.remove(PENDING_KEY);
+    if (p) await chrome.storage.local.set({ [PENDING_KEY]: p });
+    else await chrome.storage.local.remove(PENDING_KEY);
   } catch {
-    // session 실패해도 memory로 같은 SW 생애 안에서는 수집 가능
+    /* memory만으로라도 같은 SW에선 동작 */
   }
+  if (prevTab != null && prevTab !== p?.tabId) await setBadge(prevTab, false);
+  await setBadge(p?.tabId ?? prevTab, !!p);
 }
 
 async function getPendingRegion(): Promise<PendingRegion | null> {
@@ -324,7 +365,7 @@ async function getPendingRegion(): Promise<PendingRegion | null> {
     return pendingMemory;
   }
   try {
-    const data = await chrome.storage.session.get(PENDING_KEY);
+    const data = await chrome.storage.local.get(PENDING_KEY);
     const p = data[PENDING_KEY] as PendingRegion | undefined;
     if (p?.snap && typeof p.tabId === "number") {
       pendingMemory = p;
@@ -345,11 +386,90 @@ async function activeHttpTab(): Promise<chrome.tabs.Tab | undefined> {
 }
 
 async function clearPickOnTab(tabId: number): Promise<void> {
+  const stopFn = () => {
+    const g = globalThis as unknown as {
+      __jobscrapStopPick?: () => void;
+      __jobscrapClearPick?: () => void;
+    };
+    (g.__jobscrapStopPick || g.__jobscrapClearPick)?.();
+  };
   try {
-    await chrome.tabs.sendMessage(tabId, { type: "CLEAR_PICK" });
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: stopFn,
+    });
   } catch {
     /* tab may be gone */
   }
+  const all = await withTimeout(
+    chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: stopFn,
+    }),
+    1500
+  );
+  if (!all.ok) {
+    try {
+      await chrome.tabs.sendMessage(tabId, { type: "CLEAR_PICK" });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+type PickFrameResult = {
+  started?: boolean;
+  reason?: string;
+  href?: string;
+  isTop?: boolean;
+};
+
+async function startPickOnTab(tabId: number): Promise<PickFrameResult[]> {
+  await injectExtract(tabId);
+  const startFn = () => {
+    const g = globalThis as unknown as {
+      __jobscrapStartPick?: () => { started: boolean; reason: string };
+    };
+    if (typeof g.__jobscrapStartPick !== "function") {
+      return {
+        started: false,
+        reason: "no_fn",
+        href: location.href,
+        isTop: window.top === window,
+      };
+    }
+    const r = g.__jobscrapStartPick();
+    return {
+      ...r,
+      href: location.href,
+      isTop: window.top === window,
+    };
+  };
+  // top 먼저 — maps 등 외부 iframe 때문에 allFrames가 걸려도 선택 UI는 뜬다
+  const top = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: startFn,
+  });
+  const topResults = top
+    .map((x) => x.result as PickFrameResult | null)
+    .filter((x): x is PickFrameResult => !!x);
+  if (topResults.some((r) => r.started)) return topResults;
+
+  // top이 큰 iframe 때문에 건너뛴 경우에만 하위 프레임 시도
+  const all = await withTimeout(
+    chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: startFn,
+    }),
+    2500
+  );
+  if (!all.ok) {
+    await pushDebugLog("pick_all_frames_timeout", { tabId });
+    return topResults;
+  }
+  return all.value
+    .map((x) => x.result as PickFrameResult | null)
+    .filter((x): x is PickFrameResult => !!x);
 }
 
 async function collectFromSnap(
@@ -380,6 +500,10 @@ async function collectCurrentTab(): Promise<{
   job?: StoredJob;
   error?: string;
 }> {
+  const settings = await getSettings();
+  if (!settings.apiKey?.trim()) {
+    return { ok: false, error: "API 키를 먼저 입력해 주세요." };
+  }
   const tab = await activeHttpTab();
   if (!tab?.id || !tab.url) {
     return { ok: false, error: "활성 탭이 없습니다." };
@@ -414,48 +538,53 @@ async function collectCurrentTab(): Promise<{
   }
 }
 
-/** 팝업 더블클릭 등으로 AI가 중복 호출되지 않게 */
+/** 실제 AI 수집만 잠근다. 영역 선택은 잠그지 않는다. */
 let collectLock = false;
-let pickTimer: ReturnType<typeof setTimeout> | undefined;
-
-function armPickTimeout() {
-  if (pickTimer) clearTimeout(pickTimer);
-  pickTimer = setTimeout(() => {
-    collectLock = false;
-    pickTimer = undefined;
-  }, 90000);
-}
-
-function clearPickTimeout() {
-  if (pickTimer) clearTimeout(pickTimer);
-  pickTimer = undefined;
-}
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === "DEBUG_LOG") {
+    void pushDebugLog(
+      String(message.event || "log"),
+      (message.detail as Record<string, unknown>) || undefined
+    ).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+
   if (message.type === "PICK_REGION") {
-    if (collectLock) {
-      sendResponse({ ok: false, error: "이미 수집 중입니다. 잠시만 기다려 주세요." });
-      return false;
-    }
-    collectLock = true;
     void (async () => {
       const tab = await activeHttpTab();
       if (!tab?.id || !tab.url || !isHttpPageUrl(tab.url)) {
-        collectLock = false;
+        await pushDebugLog("pick_region_bad_tab", { url: tab?.url || null });
         sendResponse({ ok: false, error: "http(s) 페이지에서만 영역을 고를 수 있습니다." });
         return;
       }
       try {
-        await injectExtract(tab.id);
-        await chrome.tabs.sendMessage(tab.id, { type: "START_PICK" });
-        armPickTimeout();
-        sendResponse({ ok: true });
-      } catch (e) {
-        collectLock = false;
-        sendResponse({
-          ok: false,
-          error: e instanceof Error ? e.message : "영역 선택을 시작하지 못했습니다.",
+        await pushDebugLog("pick_region_start", {
+          tabId: tab.id,
+          url: pageKey(tab.url),
         });
+        const frames = await startPickOnTab(tab.id);
+        const started = frames.filter((f) => f.started);
+        await pushDebugLog("pick_region_frames", {
+          tabId: tab.id,
+          frames,
+          startedCount: started.length,
+        });
+        if (!started.length) {
+          const reasons = frames.map((f) => f.reason || "?").join(", ");
+          sendResponse({
+            ok: false,
+            error: `영역 선택 UI를 띄우지 못했습니다 (${reasons || "no_frames"}). 페이지를 새로고침한 뒤 다시 시도해 주세요.`,
+            frames,
+          });
+          return;
+        }
+        sendResponse({ ok: true, frames, startedCount: started.length });
+      } catch (e) {
+        const err =
+          e instanceof Error ? e.message : "영역 선택을 시작하지 못했습니다.";
+        await pushDebugLog("pick_region_error", { error: err });
+        sendResponse({ ok: false, error: err });
       }
     })();
     return true;
@@ -463,39 +592,33 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === "REGION_PICKED") {
     void (async () => {
-      try {
-        if (message.cancel) {
-          sendResponse({ ok: false, error: "영역 선택을 취소했습니다." });
-          return;
-        }
-        const snap = message.snap as FrameSnap | undefined;
-        const tabId = _sender.tab?.id;
-        const pageUrl = _sender.tab?.url || snap?.href || "";
-        if (!snap || tabId == null || !pageUrl || !isHttpPageUrl(pageUrl)) {
-          sendResponse({ ok: false, error: "선택한 영역의 페이지 주소를 알 수 없습니다." });
-          return;
-        }
-        if (isEmptyExtract(snap.text.length, snap.imageUrls.length)) {
-          sendResponse({
-            ok: false,
-            error:
-              snap.note ||
-              "선택한 영역에 글자가 거의 없고, 큰 이미지도 없습니다. 다른 영역을 선택해 주세요.",
-          });
-          return;
-        }
-        const pending: PendingRegion = {
-          tabId,
-          url: pageKey(pageUrl),
-          snap,
-        };
-        // 콘텐츠 스크립트가 응답을 기다리므로, storage까지 쓴 뒤 응답한다.
-        await setPendingRegion(pending);
-        sendResponse({ ok: true, pending: toPendingView(pending) });
-      } finally {
-        clearPickTimeout();
-        collectLock = false;
+      if (message.cancel) {
+        sendResponse({ ok: false, error: "영역 선택을 취소했습니다." });
+        return;
       }
+      const snap = message.snap as FrameSnap | undefined;
+      const tabId = _sender.tab?.id;
+      const pageUrl = _sender.tab?.url || snap?.href || "";
+      if (!snap || tabId == null || !pageUrl || !isHttpPageUrl(pageUrl)) {
+        sendResponse({ ok: false, error: "선택한 영역의 페이지 주소를 알 수 없습니다." });
+        return;
+      }
+      if (isEmptyExtract(snap.text.length, snap.imageUrls.length)) {
+        sendResponse({
+          ok: false,
+          error:
+            snap.note ||
+            "선택한 영역에 글자가 거의 없고, 큰 이미지도 없습니다. 다른 영역을 선택해 주세요.",
+        });
+        return;
+      }
+      const pending: PendingRegion = {
+        tabId,
+        url: pageKey(pageUrl),
+        snap,
+      };
+      await setPendingRegion(pending);
+      sendResponse({ ok: true, pending: toPendingView(pending) });
     })();
     return true;
   }
@@ -604,15 +727,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === "EXPORT_JSON") {
     void getJobs().then((jobs) =>
-      sendResponse({
-        ok: true,
-        json: JSON.stringify(
-          { version: 1, exportedAt: new Date().toISOString(), jobs },
-          null,
-          2
-        ),
-      })
+      sendResponse({ ok: true, json: serializeJobsExport(jobs) })
     );
+    return true;
+  }
+
+  if (message.type === "IMPORT_JSON") {
+    void (async () => {
+      try {
+        const jobs = parseJobsExport(String(message.json || ""));
+        const mode = message.mode === "replace" ? "replace" : "merge";
+        const result = await importJobs(jobs, mode);
+        sendResponse({ ok: true, ...result });
+      } catch (e) {
+        sendResponse({
+          ok: false,
+          error: e instanceof Error ? e.message : "가져오기에 실패했습니다.",
+        });
+      }
+    })();
     return true;
   }
 
